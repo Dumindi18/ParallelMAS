@@ -4,6 +4,8 @@ from uuid import uuid4
 from .schema import DependencyRef
 from .recording import canonical
 
+PROMPT_VERSION = "1.1"
+
 
 @dataclass
 class Agent:
@@ -65,8 +67,8 @@ class Runtime:
                                  {"tool_name": name, "tool_version": "1.0"})
 
     async def call_model(self, agent, step, document, fixture, dependencies=()):
-        agent.context = [{"role": "system", "content": agent.role + " Return only JSON with document_id, quantity, unit_cost_cents. Extract facts from the document; do not invent values."},
-                         {"role": "user", "content": document}]
+        agent.context = [{"role": "system", "content": agent.role + " Return only JSON with document_id, quantity, unit_cost_cents. The input contains document_id metadata and document text. Copy document_id exactly from the metadata; do not infer or rename it. Extract quantity and unit_cost_cents from the document text; do not invent values."},
+                         {"role": "user", "content": canonical(document).decode("utf-8")}]
         body = self.model.request(agent.context, self.config.experiment.seed)
         async def invoke(evidence):
             return await self.model.generate(body, agent.agent_id, step, fixture, evidence)
@@ -96,7 +98,9 @@ async def workflow(runtime, task):
                "unit_cost_cents": task["requirements"]["unit_cost_cents"]}
 
     async def inspect(agent):
-        document, event, ref = await runtime.call_tool(agent, "read_document", "local_document", {}, lambda _: task["document"])
+        document, event, ref = await runtime.call_tool(agent, "read_document", "local_document",
+            {"document_id": task["document_id"]},
+            lambda _: {"document_id": task["document_id"], "document": task["document"]})
         facts, end, output_ref = await runtime.call_model(agent, "extract_facts", document, fixture,
             [DependencyRef(event_id=event.event_id, relationship="produced_output")])
         agent.status = "completed"
@@ -121,4 +125,3 @@ async def workflow(runtime, task):
         [DependencyRef(event_id=value[1].event_id, relationship="produced_output") for value in [extracted, checked]]))
     executor.status = "completed"
     return result, [extractor, checker, executor]
-

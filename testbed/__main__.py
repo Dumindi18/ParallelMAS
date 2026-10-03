@@ -12,7 +12,7 @@ import psutil
 import yaml
 from .model import SharedModel, ModelFailure
 from .recording import Recorder, save_json, utc_now, validate_trace
-from .runtime import Runtime, workflow
+from .runtime import PROMPT_VERSION, Runtime, workflow
 from .evaluation import check_outcome
 from .schema import Config
 
@@ -64,7 +64,7 @@ async def run(config, output_root):
                 "dependency_versions": {p: importlib.metadata.version(p) for p in ["httpx", "pydantic", "PyYAML", "psutil"]},
                 "machine": {"system": platform.platform(), "python": platform.python_version(),
                             "cpu_count": psutil.cpu_count(), "ram_total_bytes": psutil.virtual_memory().total},
-                "prompt_versions": {"extract_facts": "1.0"}, "ollama_version": None, "model_digest": None,
+                "prompt_versions": {"extract_facts": PROMPT_VERSION}, "ollama_version": None, "model_digest": None,
                 "concurrency_description": "Agents execute asynchronously, with model inference restricted to one shared serving slot.",
                 "model_generation_measured": False}
     save_json(directory / "manifest.json", manifest)

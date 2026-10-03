@@ -14,6 +14,31 @@ from testbed.schema import Config, ModelConfig
 
 
 class Stage2Tests(unittest.IsolatedAsyncioTestCase):
+    async def test_document_identity_is_supplied_and_recorded_for_both_agents(self):
+        seen = {}
+        async def extract_from_prompt(model, body, agent_id, step_id, fixture, evidence):
+            from testbed.schema import Facts
+            document = json.loads(body["messages"][1]["content"])
+            self.assertEqual(set(document), {"document_id", "document"})
+            self.assertEqual(document["document_id"], "department_A")
+            self.assertIn("7 notebooks", document["document"])
+            self.assertIn("Copy document_id exactly", body["messages"][0]["content"])
+            seen[agent_id] = document
+            # Derive identity from the actual request, independently of fixture answers.
+            return Facts(document_id=document["document_id"], quantity=7, unit_cost_cents=125)
+        with tempfile.TemporaryDirectory() as tmp, patch.object(SharedModel, "generate", extract_from_prompt):
+            path, passed = await run(Config(experiment={"name": "identity", "task_id": "orders_001"}), tmp)
+            self.assertTrue(passed)
+            self.assertEqual(set(seen), {"agent_extractor", "agent_checker"})
+            manifest = json.loads((path / "manifest.json").read_text())
+            self.assertEqual(manifest["prompt_versions"]["extract_facts"], "1.1")
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            for event in events:
+                if event["event_type"] == "model_request" and event["status"] == "started":
+                    ref = event["input_refs"][0]
+                    request = json.loads((path / "payloads" / f"{ref['payload_id']}.json").read_text())
+                    self.assertEqual(json.loads(request["messages"][1]["content"]), seen[event["agent_id"]])
+
     async def test_failed_model_run_preserves_valid_trace_and_separate_outcome(self):
         async def fail(*args, **kwargs):
             raise ModelFailure("malformed_model_output")
