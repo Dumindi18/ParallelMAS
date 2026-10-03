@@ -15,6 +15,7 @@ from .recording import Recorder, save_json, utc_now, validate_trace
 from .runtime import PROMPT_VERSION, Runtime, workflow
 from .evaluation import check_outcome
 from .schema import Config
+from .aggregation import ParallelRuntime, parallel_workflow, JoinTimeout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,8 +57,9 @@ async def run(config, output_root):
     recorder = Recorder(directory, run_id)
     (directory / "config.resolved.yaml").write_text(yaml.safe_dump(config.model_dump()), encoding="utf-8")
     task = json.loads((ROOT / "tasks" / f"{config.experiment.task_id}.json").read_text(encoding="utf-8"))
-    save_json(directory / "task_contract.json", task)
-    manifest = {"run_id": run_id, "stage": 2, "execution_mode": config.experiment.mode,
+    save_json(directory / "task_contract.json", {key: value for key, value in task.items() if key != "fixture_facts"})
+    stage = 3 if config.workflow.template == "parallel_aggregation" else 2
+    manifest = {"run_id": run_id, "stage": stage, "execution_mode": config.experiment.mode,
                 "status": "started", "start_time_utc": utc_now(), "end_time_utc": None,
                 "code_commit": command_output(["git", "rev-parse", "HEAD"]),
                 "working_tree_status": command_output(["git", "status", "--porcelain"]),
@@ -71,6 +73,7 @@ async def run(config, output_root):
     stop = asyncio.Event()
     monitoring = asyncio.create_task(monitor(directory, stop, config.recording.resource_sample_interval_seconds))
     model = None
+    runtime = None
     output = None
     infrastructure, model_outcomes = [], []
     operation, attempt = uuid4().hex, uuid4().hex
@@ -79,14 +82,18 @@ async def run(config, output_root):
     try:
         async with asyncio.timeout(config.runtime.run_timeout_seconds):
             model = SharedModel(config.model, config.experiment.mode, config.experiment.replay_directory)
+            runtime = ParallelRuntime(config, recorder, model) if stage == 3 else Runtime(config, recorder, model)
             await model.initialize()
             manifest.update(model_digest=model.model_digest, ollama_version=model.ollama_version)
-            output, agents = await workflow(Runtime(config, recorder, model), task)
+            output, agents = await (parallel_workflow(runtime, task) if stage == 3 else workflow(runtime, task))
             manifest["agents"] = [{"agent_id": a.agent_id, "role": a.role, "status": a.status,
                                    "actions": a.actions, "local_sequence": a.local_sequence} for a in agents]
     except ModelFailure as exc:
         model_outcomes.append(str(exc))
         status = "failed"
+    except JoinTimeout:
+        infrastructure.append("join_timeout")
+        status = "timed_out"
     except TimeoutError:
         infrastructure.append("run_timeout")
         status = "timed_out"
@@ -114,12 +121,17 @@ async def run(config, output_root):
     assessment.update(trace_validity=validation["valid"], infrastructure_failures=infrastructure,
                       model_outcomes=model_outcomes, execution_mode=config.experiment.mode)
     save_json(directory / "private" / "outcome_assessment.json", assessment)
-    save_json(directory / "private" / "injection_manifest.json", {"enabled": False, "status": "not_requested", "stage": 2})
+    injection = runtime.injection if isinstance(runtime, ParallelRuntime) else {"enabled": False, "status": "not_requested"}
+    if injection.get("enabled"):
+        injection["status"] = ("invalid_infrastructure" if infrastructure else
+                               "activated_and_task_failed" if injection["activated"] and assessment["task_correctness"] == "failure" else
+                               "activated_harmless" if injection["activated"] else "not_activated")
+    save_json(directory / "private" / "injection_manifest.json", {**injection, "stage": stage})
     save_json(directory / "private" / "reference_labels.json", {
-        "task_outcome": assessment["task_correctness"], "injection_status": "not_requested",
+        "task_outcome": assessment["task_correctness"], "injection_status": injection["status"],
         "first_observed_contract_violation": None, "candidate_origin_events": [],
         "missed_recovery_events": [], "supported_cause_events": [], "intervention_result": "unknown",
-        "review_status": "unreviewed", "label_notes": "No failure attribution is performed in Stage 2."})
+        "review_status": "unreviewed", "label_notes": "Injection activation is not a confirmed root cause. No failure attribution is performed."})
     # Export only explicit observed references; no harmful-cause inference or workflow-required edges.
     save_json(directory / "observed_dependencies.json", {
         "edges": [{"source": dep.event_id, "target": e.event_id, "relationship": dep.relationship}
@@ -132,8 +144,8 @@ async def run(config, output_root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 2 instrumented workflow; defaults to model-free scripted fixtures")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage2.yaml")
+    parser = argparse.ArgumentParser(description="Stage 3 parallel aggregation; defaults to model-free scripted fixtures")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage3.yaml")
     parser.add_argument("--output-root", type=Path, default=ROOT / "runs")
     parser.add_argument("--mode", choices=["scripted_fixture", "live", "recorded_response"])
     parser.add_argument("--replay-directory")
@@ -145,7 +157,10 @@ def main():
         data["experiment"]["replay_directory"] = args.replay_directory
     config = Config.model_validate(data)
     directory, passed = asyncio.run(run(config, args.output_root))
-    print(json.dumps({"run_directory": str(directory.resolve()), "passed": passed, "execution_mode": config.experiment.mode}))
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    print(json.dumps({"run_directory": str(directory.resolve()), "passed": passed, "execution_mode": config.experiment.mode,
+                      "status": manifest["status"], "task_correctness": manifest["task_correctness"],
+                      "trace_validity": manifest["trace_validity"]}))
     raise SystemExit(0 if passed else 1)
 
 

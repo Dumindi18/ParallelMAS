@@ -1,1 +1,1 @@
-"""Stage 2 research testbed; diagnosis remains outside this package."""
+"""Stages 2 and 3 research testbed; diagnosis remains outside this package."""

@@ -1,0 +1,10 @@
+experiment:
+  name: parallel_aggregation_harmless_delay
+  task_id: aggregation_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: parallel_aggregation
+  join_release_condition: all_inputs
+  message_delays:
+    agent_worker_2: 0.1

@@ -34,9 +34,11 @@ class Runtime:
         evidence = dict(details or {})
         begin = self.recorder.emit(agent.agent_id, step, kind, "started", operation, attempt,
                                    inputs=[input_ref], dependencies=dependencies, **evidence)
-        dependencies = [DependencyRef(event_id=begin.event_id, relationship="operation_start")]
+        dependencies = [*dependencies, DependencyRef(event_id=begin.event_id, relationship="operation_start")]
         try:
             result = await function(evidence)
+            dependencies.extend(evidence.pop("_dependencies", []))
+            extra_inputs = evidence.pop("_input_refs", [])
             value = result.model_dump() if hasattr(result, "model_dump") else result
             output = self.recorder.payload(value)
             evidence_refs = []
@@ -45,15 +47,17 @@ class Runtime:
                 evidence["response_ref"] = raw.model_dump()
                 evidence_refs.append(raw)
             end = self.recorder.emit(agent.agent_id, step, kind, "completed", operation, attempt,
-                                     inputs=[input_ref], outputs=[output, *evidence_refs], dependencies=dependencies, **evidence)
+                                     inputs=[input_ref, *extra_inputs], outputs=[output, *evidence_refs], dependencies=dependencies, **evidence)
             return result, end, output
         except BaseException as exc:
-            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "timed_out" if isinstance(exc, TimeoutError) else "failed"
+            dependencies.extend(evidence.pop("_dependencies", []))
+            extra_inputs = evidence.pop("_input_refs", [])
             outputs = []
             if "response" in evidence:
                 outputs.append(self.recorder.payload(evidence.pop("response")))
             self.recorder.emit(agent.agent_id, step, kind, status, operation, attempt,
-                               inputs=[input_ref], outputs=outputs, dependencies=dependencies,
+                               inputs=[input_ref, *extra_inputs], outputs=outputs, dependencies=dependencies,
                                error_type=type(exc).__name__, error=str(exc), **evidence)
             agent.status = status
             raise
