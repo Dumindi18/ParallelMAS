@@ -1,0 +1,8 @@
+{
+  "task_id": "orders_001",
+  "description": "Extract the order facts from one departmental document and independently check them against that document.",
+  "document_id": "department_A",
+  "document": "Department A ordered 7 notebooks. The unit price is 125 cents. No other items were ordered.",
+  "requirements": {"quantity": 7, "unit_cost_cents": 125, "total_cost_cents": 875},
+  "approval_required": true
+}

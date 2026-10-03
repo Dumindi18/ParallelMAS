@@ -1,0 +1,21 @@
+experiment:
+  name: stage2_fact_extraction
+  task_id: orders_001
+  mode: scripted_fixture
+  seed: 42
+runtime:
+  agents: 3
+  max_steps_per_agent: 8
+  run_timeout_seconds: 600
+model:
+  base_url: http://localhost:11434
+  name: qwen3:8b
+  inference_slots: 1
+  num_ctx: 4096
+  num_predict: 384
+  think: false
+  temperature: 0.2
+recording:
+  capture_model_inputs: true
+  capture_payloads: true
+  resource_sample_interval_seconds: 1
