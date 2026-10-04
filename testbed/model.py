@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 import httpx
 from .recording import digest
-from .schema import Facts
+from .schema import Facts, OrderDecision
 
 
 class ModelFailure(Exception):
@@ -49,9 +49,9 @@ class SharedModel:
             raise RuntimeError("qwen3:8b must already be installed, with a discoverable digest")
         self.model_digest = match["digest"]
 
-    def request(self, messages, seed):
+    def request(self, messages, seed, response_model=Facts):
         return {"model": self.config.name, "messages": messages, "stream": False,
-                "think": self.config.think, "format": Facts.model_json_schema(),
+                "think": self.config.think, "format": response_model.model_json_schema(),
                 "options": {"num_ctx": self.config.num_ctx, "num_predict": self.config.num_predict,
                             "temperature": self.config.temperature, "seed": seed}}
 
@@ -93,7 +93,11 @@ class SharedModel:
             if message.get("thinking"):
                 raise ModelFailure("thinking_not_disabled")
             try:
-                return Facts.model_validate_json(message["content"])
+                response_model = next((schema for schema in (Facts, OrderDecision)
+                                       if schema.model_json_schema() == body["format"]), None)
+                if response_model is None:
+                    raise ValueError("unsupported response schema")
+                return response_model.model_validate_json(message["content"])
             except (ValueError, KeyError) as exc:
                 raise ModelFailure("malformed_model_output") from exc
         except httpx.HTTPStatusError as exc:

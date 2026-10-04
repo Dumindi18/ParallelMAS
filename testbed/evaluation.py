@@ -4,6 +4,30 @@
 def check_outcome(task, output):
     if output is None:
         return {"task_correctness": "unknown", "execution_contract_violations": []}
+    if "initial_value" in task:
+        final = output["final_record"]
+        orders = final["value"]["accepted_orders"]
+        expected = {item["order_id"]: item["quantity"] for item in task["requirements"]["required_orders"]}
+        actual = {item["order_id"]: item["quantity"] for item in orders}
+        violations = []
+        if final["key"] != task["key"]:
+            violations.append("inventory_key_mismatch")
+        if len(actual) != len(orders):
+            violations.append("duplicate_reservation")
+        if actual != expected:
+            violations.append("required_orders_not_preserved")
+        accepted = [item["order"] for item in output["updates"] if item["write_accepted"]]
+        if any(actual.get(item["order_id"]) != item["quantity"] for item in accepted):
+            violations.append("accepted_update_overwritten")
+        available = final["value"]["available_quantity"]
+        if available != task["initial_value"]["available_quantity"] - sum(item["quantity"] for item in accepted):
+            violations.append("inventory_inconsistent_with_accepted_writes")
+        if any(not item["write_accepted"] for item in output["updates"]):
+            violations.append("reservation_write_rejected_without_recovery")
+        if task["requirements"]["require_current_at_read"] and any(item["read_version"] != item["current_version_at_read"] for item in output["updates"]):
+            violations.append("stale_snapshot_used")
+        correct = available == task["requirements"]["expected_available_quantity"] and not violations
+        return {"task_correctness": "success" if correct else "failure", "execution_contract_violations": violations}
     if "documents" in task:
         required = task["requirements"]["required_document_ids"]
         included = output["included_document_ids"]

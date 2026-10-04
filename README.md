@@ -1,6 +1,6 @@
-# ParallelMAS - Stages 2 and 3
+# ParallelMAS - Stages 2 through 4
 
-A lightweight asynchronous research testbed following section 15 of the supplied guide. Stage 2 provides the runtime, shared model wrapper, recorder and checker. **Stage 3 adds Template A: parallel fact collection and aggregation**, with per-recipient queues, message consumption, all-input joins and an explicit premature-join experiment. Calibration is omitted as requested.
+A lightweight asynchronous research testbed following section 15 of the supplied guide. Stage 2 provides the runtime, shared model wrapper, recorder and checker. Stage 3 adds parallel aggregation with message consumption and joins. **Stage 4 adds Template C: concurrent shared-record updates**, named asynchronous scheduling gates, version history, unconditional writes and compare-and-set. Calibration is omitted as requested.
 
 The default is a model-free **scripted fixture**. Fixtures and mock HTTP tests are engineering evidence, not live Qwen3 research data. The development machine does not need a model.
 
@@ -24,7 +24,60 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The default configuration is now `configs/stage3.yaml`. YAML is validated with Pydantic; unknown settings and inconsistent task, agent count and fault conditions are rejected. Each run saves its fully resolved configuration. Defaults remain one inference slot, eight actions per agent maximum and a 600-second run timeout. Run experiments sequentially.
+The default configuration is now `configs/stage4.yaml`. YAML is validated with Pydantic; unknown settings and inconsistent task, schedule, write policy, agent count and fault conditions are rejected. Each run saves its fully resolved configuration. Defaults remain one inference slot, eight actions per agent maximum and a 600-second run timeout. Run experiments sequentially.
+
+## Stage 4 scheduling and shared state
+
+Two updating agents process separate inventory orders and one verifier inspects the final record. Qwen3 interprets each order document into structured `order_id` and `quantity` fields; identifiers are supplied explicitly and copied unchanged. The model input includes the actual snapshot key, version and value. Deterministic code prepares the reservation update, writes the state and checks outcomes. Expected answers, injection controls and fixture responses are never included in live model inputs.
+
+Each run starts with **one shared record**, `inventory.item_A`, reset to version 0. Every version preserves `key`, `version`, `value` and its exact `writer_event_id`. State operations pass through instrumented `read_state` and `write_state` wrappers. Reads record the returned version/value, originating write and actual current version. Writes record base/expected version, previous current version/value, previous writer, acceptance/rejection and new version/value.
+
+- **Unconditional writes** accept a proposal based on an older snapshot and can overwrite another agent's reservation.
+- **Compare-and-set** accepts only if the expected version matches the current version; conflicts are recorded without changing state or creating a new version.
+
+Each accepted write creates a version even if its value is unchanged. Each individual state operation is atomic; no lock covers the entire read-modify-write sequence. Snapshot copies prevent agents from mutating stored history outside the wrappers.
+
+### Named scheduling profiles
+
+`schedule.mode: natural` with `profile: natural` adds no ordering constraints. `mode: controlled` uses named gates around the instrumented read/write actions:
+
+| Profile | Required action order |
+| --- | --- |
+| `a_then_b` | A reads, A writes, B reads, B writes |
+| `b_then_a` | B reads, B writes, A reads, A writes |
+| `both_read_before_writes` | A reads, B reads, A writes, B writes |
+
+Gates wait on completed checkpoints using asynchronous events, not guessed sleep durations. Actual state actions and released checkpoints are recorded. Planned constraints live in `private/schedule_plan.json`; actual checkpoint evidence lives in `observed_schedule.json`. `private/schedule_assessment.json` checks whether the planned order actually occurred. A gate timeout or interrupted schedule is recorded rather than claimed as reproduced. These initial named profiles apply to the shared-record template; Stage 3's delivery completion gate remains available separately.
+
+### Stage 4 experiments
+
+```powershell
+.venv/Scripts/python.exe -m testbed --config configs/stage4.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_reverse.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_lost_update.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_stale_state.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_conflict.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_natural.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage4_second_task.yaml
+```
+
+Linux uses `.venv/bin/python` instead. All commands above use fixtures unless `--mode live` is supplied.
+
+| Configuration | Expected fixture behavior |
+| --- | --- |
+| `stage4.yaml` | Serialized CAS updates; both orders retained; final available quantity 3; success |
+| `stage4_reverse.yaml` | Same reservations in reverse order; quantity 3; success |
+| `stage4_lost_update.yaml` | Both agents read version 0; unconditional B write overwrites A; quantity 6; task failure |
+| `stage4_stale_state.yaml` | After A writes version 1, B receives version 0; stale snapshot overwrites A; quantity 6; task failure |
+| `stage4_conflict.yaml` | Both read version 0; CAS rejects B after A writes; quantity 7; task failure without recovery |
+| `stage4_natural.yaml` | Unconstrained asynchronous CAS; actual outcome depends on order/conflicts |
+| `stage4_second_task.yaml` | Second inventory task, initial quantity 20 and orders of 5 and 6; final quantity 9; success |
+
+The task contract requires both valid orders to remain in state, correct quantities, inventory consistent with accepted writes and a current snapshot at the instant of each updater read. Merely becoming older later while another branch executes is not automatically a read-freshness violation. The deterministic checker reports missing/overwritten reservations, unrecovered rejection and stale-snapshot use separately from trace validity.
+
+`lost_update` explicitly requires an enabled fault, `both_read_before_writes` and unconditional writes. `stale_state` uses a separate named state-read hook, supplying historical version 0 to updater B after A's write. Private records include target reached, activation, original/selected values and the exact injection event. Only one fault activates per run. The lost-update condition consists of schedule plus write policy, with no additional payload mutation. Both histories and the actual read/write dependencies remain observable. Injection activation is not a confirmed causal label.
+
+**No conflict retry is implemented in Stage 4.** `workflow.max_additional_retries` is restricted to 0. The conflict example demonstrates CAS protection from overwrite, but the task still fails because one required reservation is missing. Bounded conflict recovery belongs to Stage 5.
 
 ## Stage 3 workflow
 
@@ -32,7 +85,7 @@ Two or three workers read separate departmental documents using an instrumented 
 
 The aggregator waits for a join, receives and consumes the accepted messages, then calculates total quantity and cost with deterministic integer arithmetic. The checker requires all document results exactly once, correct worker/document assignments and correct final totals. Extraction is the meaningful model decision; transport, joins, arithmetic and evaluation are deterministic.
 
-Each agent has its own role, context, inbox, semantic step, local sequence, bounded action count and execution status. Agents use instrumented `call_model`, `call_tool`, `send_message`, `receive_message`, `consume_message` and `wait_for_join` wrappers. Only the runtime accesses inboxes. State wrappers remain Stage 4 work.
+Each agent has its own role, context, inbox, semantic step, local sequence, bounded action count and execution status. Agents use instrumented `call_model`, `call_tool`, `send_message`, `receive_message`, `consume_message` and `wait_for_join` wrappers. Only the runtime accesses inboxes. Stage 4 adds instrumented state read/write wrappers for its separate shared-record workflow.
 
 ### Message and join evidence
 
@@ -65,9 +118,9 @@ For Linux, replace the executable with `.venv/bin/python`.
 | `stage3_three_workers.yaml` | Three workers, four agents, second task instance | Quantity 12, cost 2900 cents, success |
 | `stage3_premature.yaml` | Explicit join release after one result | Completed runtime, valid trace, failed task |
 
-The premature condition explicitly enables `fault.family: premature_join` and sets `workflow.join_release_condition: premature`. Validation prevents silently enabling it for a normal join. The delivery layer holds worker 2's result until the named `aggregate_orders` action finishes, then delivers it without consumption. This completion gate reproduces the selected order without guessing a sleep duration. The configuration records the planned constraint; the actual event evidence shows whether it happened. General scheduling remains Stage 4 work.
+The premature condition explicitly enables `fault.family: premature_join` and sets `workflow.join_release_condition: premature`. Validation prevents silently enabling it for a normal join. The delivery layer holds worker 2's result until the named `aggregate_orders` action finishes, then delivers it without consumption. This completion gate reproduces the selected order without guessing a sleep duration. The configuration records the planned constraint; the actual event evidence shows whether it happened. Stage 4 supplies named read/write schedules for the shared-record template.
 
-The private injection manifest records requested target, target reached, activation, original requirements versus accepted inputs, injection event and outcome. Injection location is not automatically a confirmed root cause. Only the premature-join fault is implemented in this stage.
+The private injection manifest records requested target, target reached, activation, original requirements versus accepted inputs, injection event and outcome. Injection location is not automatically a confirmed root cause. Stage 3 implements premature joins; Stage 4 additionally implements stale-state and lost-update conditions.
 
 Configure natural delivery latency through `workflow.message_delays` keyed by worker ID, join timeout through `workflow.join_timeout_seconds` (default 300), and the explicit premature threshold through `workflow.premature_after_results`. Task `aggregation_001` requires three agents; `aggregation_002` requires four. The normal join always waits for all required inputs or records a timeout; it never silently accepts partial results.
 
@@ -82,8 +135,8 @@ The asynchronous HTTP wrapper shares one Ollama server and semaphore. Defaults: 
 On the Qwen3 machine:
 
 ```powershell
-.venv/Scripts/python.exe -m testbed --config configs/stage3.yaml --mode live
-.venv/Scripts/python.exe -m testbed --config configs/stage3_premature.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage4.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage4_lost_update.yaml --mode live
 ```
 
 Linux uses `.venv/bin/python`. Full Windows/Linux setup and replay instructions are in [RUN_WITH_QWEN3.md](RUN_WITH_QWEN3.md).
@@ -92,7 +145,7 @@ Agents execute asynchronously, with model inference restricted to one shared ser
 
 ## Run outputs and interpretation
 
-The console reports `run_directory`, `passed`, mode, runtime status, task correctness and trace validity. Exit code 0 requires completed runtime, correct task output and valid trace. Exit code 1 means at least one check failed. **The premature example intentionally returns `passed: false` and exit code 1, even when its mechanism works correctly.** Inspect the separate outcome fields to distinguish expected task failure from infrastructure or trace errors.
+The console reports `run_directory`, `passed`, mode, runtime status, task correctness and trace validity. Exit code 0 requires completed runtime, correct task output and valid trace. Exit code 1 means at least one check failed. **The premature-join, lost-update, stale-state and unrecovered-conflict examples intentionally return `passed: false` and exit code 1, even when their mechanisms work correctly.** Inspect the separate outcome fields to distinguish expected task failure from infrastructure or trace errors.
 
 Each `runs/run_<id>/` contains:
 
@@ -110,19 +163,22 @@ Each `runs/run_<id>/` contains:
 | `model_responses.jsonl` | Successful responses for exact-match replay |
 | `private/` | Injection manifest, outcome assessment and unreviewed labels |
 
+Stage 4 additionally saves `state_history.json` (all accepted versions including overwritten values), `observed_schedule.json` (actual checkpoints), and private schedule plan/assessment files. The final output includes the verifier's final record, per-updater read versions and accepted/rejected write results. The observed dependency export includes originating-write-to-read, read-to-write, previous-write and actual scheduling edges; it does not identify harmful causes.
+
 Task correctness, contract violations, trace validity, infrastructure errors and model outcomes are separate. Keep private records, resolved experimental settings and replay internals out of future diagnostic inputs. No harmful cause is inferred from connections or nearby timestamps. Resource sampling measures the runtime machine, not a remote model server. Short fixture runs may have one sample.
 
-Validation checks IDs, actor sequences, payload hashes, paired operation events, message producer/envelope/lifecycle consistency, join acceptance and equality between consumed payloads and actual aggregation inputs. Tests cover reference/premature joins, late unconsumed messages, harmless latency, both task sizes, timeouts, tampering, fixture overlap and mock live/replay behavior.
+Validation checks IDs, actor sequences, payload hashes, paired operation events, message producer/envelope/lifecycle consistency, join acceptance and equality between consumed payloads and actual aggregation inputs. Stage 4 validates read/write provenance, CAS acceptance, version progression, history exports and actual checkpoints. A faithfully recorded race or stale read can have a valid trace while its task fails. Tests cover reference/premature joins, late unconsumed messages, shared-state races, stale reads, CAS conflicts, named-order reproduction, timeouts, tampering and mock live/replay behavior.
 
-## Stage 2 compatibility and later work
+## Earlier-stage compatibility and later work
 
 The earlier single-document extraction/checking workflow remains available:
 
 ```powershell
 .venv/Scripts/python.exe -m testbed --config configs/stage2.yaml
 .venv/Scripts/python.exe -m testbed --config configs/stage2.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage3.yaml --mode live
 ```
 
 Its direct controller handoffs do not claim message lifecycle events. The document-ID fix remains in both workflows, with extraction prompt version 1.1. Responses from different prompts cannot replay against changed requests.
 
-Later stages add general scheduling and versioned state, correction and bounded retries, other fault families, SQLite catalogue, dataset exports/labels, inspection UI and pilot collection. Causal attribution remains outside the testbed runtime and recorder.
+Stage 5 adds correction and bounded retries, including conflict recovery. Later work adds the remaining fault families, SQLite catalogue, dataset exports/labels, inspection UI and pilot collection. Causal attribution remains outside the testbed runtime and recorder.

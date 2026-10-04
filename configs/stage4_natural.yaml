@@ -1,0 +1,11 @@
+experiment:
+  name: inventory_natural_async
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+schedule:
+  mode: natural
+  profile: natural

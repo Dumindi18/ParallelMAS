@@ -8,7 +8,7 @@ class StrictModel(BaseModel):
 
 class Experiment(StrictModel):
     name: str
-    task_id: Literal["orders_001", "aggregation_001", "aggregation_002"]
+    task_id: Literal["orders_001", "aggregation_001", "aggregation_002", "inventory_001", "inventory_002"]
     mode: Literal["live", "recorded_response", "scripted_fixture"] = "scripted_fixture"
     seed: int = 42
     replay_directory: str | None = None
@@ -37,12 +37,14 @@ class RecordingConfig(StrictModel):
 
 
 class WorkflowConfig(StrictModel):
-    template: Literal["stage2_facts", "parallel_aggregation"] = "stage2_facts"
+    template: Literal["stage2_facts", "parallel_aggregation", "shared_record"] = "stage2_facts"
     join_release_condition: Literal["all_inputs", "premature"] = "all_inputs"
     premature_after_results: int = Field(default=1, ge=1)
     join_timeout_seconds: float = Field(default=300, gt=0)
     message_delays: dict[str, float] = Field(default_factory=dict)
     hold_branch_until_aggregation: str | None = None
+    state_write_policy: Literal["unconditional", "compare_and_set"] = "compare_and_set"
+    max_additional_retries: Literal[0] = 0
 
     @model_validator(mode="after")
     def nonnegative_delays(self):
@@ -53,9 +55,24 @@ class WorkflowConfig(StrictModel):
 
 class FaultConfig(StrictModel):
     enabled: bool = False
-    family: Literal["premature_join"] | None = None
+    family: Literal["premature_join", "lost_update", "stale_state"] | None = None
     target_join: Literal["department_orders"] = "department_orders"
     max_activations: Literal[1] = 1
+    target_key: Literal["inventory.item_A"] = "inventory.item_A"
+    target_agent: Literal["agent_updater_B"] = "agent_updater_B"
+    stale_version: Literal[0] = 0
+
+
+class ScheduleConfig(StrictModel):
+    mode: Literal["natural", "controlled"] = "natural"
+    profile: Literal["natural", "a_then_b", "b_then_a", "both_read_before_writes"] = "natural"
+    gate_timeout_seconds: float = Field(default=300, gt=0)
+
+    @model_validator(mode="after")
+    def consistent_mode(self):
+        if (self.mode == "natural") != (self.profile == "natural"):
+            raise ValueError("natural mode requires natural profile; controlled mode requires a named profile")
+        return self
 
 
 class Config(StrictModel):
@@ -65,19 +82,23 @@ class Config(StrictModel):
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     fault: FaultConfig = Field(default_factory=FaultConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
 
     @model_validator(mode="after")
     def replay_requires_source(self):
         if self.experiment.mode == "recorded_response" and not self.experiment.replay_directory:
             raise ValueError("recorded_response requires replay_directory")
         parallel = self.workflow.template == "parallel_aggregation"
+        shared = self.workflow.template == "shared_record"
         if parallel != self.experiment.task_id.startswith("aggregation_"):
             raise ValueError("task_id and workflow template must match")
+        if shared != self.experiment.task_id.startswith("inventory_"):
+            raise ValueError("inventory task_id requires shared_record template")
         required_agents = 4 if self.experiment.task_id == "aggregation_002" else 3
         if self.runtime.agents != required_agents:
             raise ValueError(f"this task requires {required_agents} agents")
         premature = self.workflow.join_release_condition == "premature"
-        if premature != self.fault.enabled or (self.fault.enabled and self.fault.family != "premature_join"):
+        if not shared and (premature != self.fault.enabled or (self.fault.enabled and self.fault.family != "premature_join")):
             raise ValueError("premature release requires an explicit enabled premature_join fault")
         if not parallel and (premature or self.workflow.message_delays or self.workflow.hold_branch_until_aggregation):
             raise ValueError("message/join conditions require parallel_aggregation")
@@ -93,6 +114,20 @@ class Config(StrictModel):
             raise ValueError("premature threshold must be reachable before releasing the held branch")
         if parallel and self.runtime.max_steps_per_agent < 2 * len(branches) + 2:
             raise ValueError("parallel aggregator needs 2 * workers + 2 actions")
+        if not shared and self.schedule.mode != "natural":
+            raise ValueError("named state scheduling profiles require shared_record")
+        if shared:
+            if self.runtime.max_steps_per_agent < 4:
+                raise ValueError("shared-record updaters require four actions")
+            if self.fault.enabled and self.fault.family not in {"lost_update", "stale_state"}:
+                raise ValueError("shared_record supports only lost_update and stale_state faults")
+            if self.fault.enabled and self.schedule.mode != "controlled":
+                raise ValueError("state fault demonstrations require a controlled schedule")
+            if self.fault.enabled and self.fault.family == "lost_update":
+                if self.schedule.profile != "both_read_before_writes" or self.workflow.state_write_policy != "unconditional":
+                    raise ValueError("lost_update requires both_read_before_writes and unconditional writes")
+            if self.fault.enabled and self.fault.family == "stale_state" and self.schedule.profile != "a_then_b":
+                raise ValueError("stale_state requires a_then_b so an older version exists at the target read")
         return self
 
 
@@ -105,7 +140,9 @@ class DependencyRef(StrictModel):
     event_id: str
     relationship: Literal["actor_local_order", "operation_start", "produced_output",
                           "message_send_delivery", "message_delivery_receive",
-                          "message_delivery_consumption", "accepted_branch_result"]
+                          "message_delivery_consumption", "accepted_branch_result",
+                          "state_write_read", "state_read_write", "state_previous_write",
+                          "schedule_order", "checkpoint_action"]
 
 
 class Event(StrictModel):
@@ -138,6 +175,11 @@ class Facts(StrictModel):
     document_id: str
     quantity: int = Field(ge=0, strict=True)
     unit_cost_cents: int = Field(ge=0, strict=True)
+
+
+class OrderDecision(StrictModel):
+    order_id: str
+    quantity: int = Field(ge=1, strict=True)
 
 
 class Message(StrictModel):

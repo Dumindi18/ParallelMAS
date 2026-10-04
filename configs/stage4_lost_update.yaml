@@ -1,0 +1,18 @@
+experiment:
+  name: inventory_lost_update
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: unconditional
+  max_additional_retries: 0
+schedule:
+  mode: controlled
+  profile: both_read_before_writes
+fault:
+  enabled: true
+  family: lost_update
+  target_key: inventory.item_A
+  target_agent: agent_updater_B
+  max_activations: 1

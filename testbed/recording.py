@@ -38,12 +38,12 @@ class Recorder:
         (self.directory / "payloads" / f"{ref.payload_id}.json").write_bytes(canonical(value))
         return ref
 
-    def emit(self, actor, step, kind, status, operation, attempt, inputs=(), outputs=(), dependencies=(), **details):
+    def emit(self, actor, step, kind, status, operation, attempt, inputs=(), outputs=(), dependencies=(), event_id=None, **details):
         sequence = self.sequences.get(actor, 0) + 1
         deps = list(dependencies)
         if actor in self.previous:
             deps.append(DependencyRef(event_id=self.previous[actor], relationship="actor_local_order"))
-        event = Event(run_id=self.run_id, event_id=uuid4().hex,
+        event = Event(run_id=self.run_id, event_id=event_id or uuid4().hex,
                       agent_id=actor if actor.startswith("agent_") else None,
                       component_id=None if actor.startswith("agent_") else actor,
                       step_id=step, event_type=kind, status=status,
@@ -92,6 +92,8 @@ def validate_trace(directory):
         if len(statuses) != 2 or statuses[0] != "started" or statuses[1] == "started":
             errors.append("operation missing start or terminal event")
     errors.extend(validate_message_evidence(directory, events))
+    from .state_validation import validate_state_evidence
+    errors.extend(validate_state_evidence(directory, events))
     return {"valid": not errors, "event_count": len(events), "errors": errors}
 
 

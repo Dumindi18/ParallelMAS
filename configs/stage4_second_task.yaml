@@ -1,0 +1,11 @@
+experiment:
+  name: inventory_second_reference
+  task_id: inventory_002
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+schedule:
+  mode: controlled
+  profile: a_then_b

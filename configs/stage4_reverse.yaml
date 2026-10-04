@@ -1,0 +1,11 @@
+experiment:
+  name: inventory_harmless_reverse_order
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+schedule:
+  mode: controlled
+  profile: b_then_a

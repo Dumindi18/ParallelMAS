@@ -1,0 +1,12 @@
+{
+  "task_id": "inventory_002",
+  "description": "Reserve two different orders on one fresh inventory record, retaining every accepted reservation.",
+  "key": "inventory.item_A",
+  "initial_value": {"available_quantity": 20, "accepted_orders": []},
+  "orders": [
+    {"order_id": "order_C", "document": "Order order_C requests 5 units of inventory.item_A."},
+    {"order_id": "order_D", "document": "Order order_D requests 6 units of inventory.item_A."}
+  ],
+  "requirements": {"expected_available_quantity": 9, "required_orders": [{"order_id": "order_C", "quantity": 5}, {"order_id": "order_D", "quantity": 6}], "require_current_at_read": true},
+  "fixture_decisions": [{"order_id": "order_C", "quantity": 5}, {"order_id": "order_D", "quantity": 6}]
+}
