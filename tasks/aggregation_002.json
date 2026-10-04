@@ -1,0 +1,15 @@
+{
+  "task_id": "aggregation_002",
+  "description": "Collect three departmental order documents and aggregate every required result exactly once.",
+  "documents": [
+    {"document_id": "department_C", "document": "Department C ordered 4 pens at 150 cents per pen."},
+    {"document_id": "department_D", "document": "Department D ordered 6 markers. The unit price is 250 cents."},
+    {"document_id": "department_E", "document": "Department E ordered 2 binders at 400 cents each."}
+  ],
+  "requirements": {"required_document_ids": ["department_C", "department_D", "department_E"], "total_quantity": 12, "total_cost_cents": 2900},
+  "fixture_facts": [
+    {"document_id": "department_C", "quantity": 4, "unit_cost_cents": 150},
+    {"document_id": "department_D", "quantity": 6, "unit_cost_cents": 250},
+    {"document_id": "department_E", "quantity": 2, "unit_cost_cents": 400}
+  ]
+}

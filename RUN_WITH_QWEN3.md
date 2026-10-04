@@ -1,42 +1,50 @@
-# Run Stage 2 on the machine with Qwen3:8b
+# Run ParallelMAS Stages 2 and 3 with Qwen3:8b
 
-No Python code changes are required. The system already supports Qwen3 through Ollama. These instructions assume the target machine runs Windows and already has `qwen3:8b` installed in Ollama.
+No Python source changes are needed. The project defaults to model-free fixtures; select `--mode live` on the machine that already has `qwen3:8b`. The default workflow is now Stage 3 parallel aggregation. Stage 2 remains selectable.
 
-## 1. Copy the project
+## 1. Copy/update and install
 
-Copy this project folder to the target machine, including `testbed/`, `tasks/`, `configs/`, and `requirements.txt`. Do not copy `.venv`; create a new environment on that machine. Existing `runs/` are optional and are not needed for a new live run.
+Copy the updated `testbed/`, `tasks/`, `configs/`, `tests/`, `requirements.txt` and documentation. Include all new Stage 3 files. Create a virtual environment on the target machine rather than copying `.venv`. Preserve previous runs if their evidence is needed.
 
-Open PowerShell in the copied project folder. Use Python 3.11 or 3.12:
+Use Python 3.11 or 3.12. From the project folder on Windows:
 
 ```powershell
 python --version
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m unittest discover -s tests -v
 ```
 
-## 2. Configure and start Ollama
+On Linux, including the machine used for the supplied live manifest:
 
-To follow the guide's initial single-model, single-inference settings:
+```bash
+python3 --version
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m unittest discover -s tests -v
+```
 
-1. Quit Ollama from its system-tray menu if it is running.
-2. Open Windows **Edit environment variables for your account**.
-3. Add or update these user environment variables:
+Tests use fixtures/mock HTTP and do not call the real model.
 
-   | Variable | Value |
-   | --- | --- |
-   | `OLLAMA_MAX_LOADED_MODELS` | `1` |
-   | `OLLAMA_NUM_PARALLEL` | `1` |
+## 2. Configure Ollama
 
-4. Start Ollama again from the Start menu.
-5. Open a new PowerShell window in the project folder and check:
+Check the installed server and exact model name:
 
-```powershell
+```text
 ollama --version
 ollama list
-Invoke-RestMethod http://localhost:11434/api/version
 ```
 
-`ollama list` must include the exact model name `qwen3:8b`. The runner does not download models. If you use a terminal-managed Ollama server instead of the desktop application, stop the existing server and start it in a separate PowerShell window with:
+`ollama list` must include `qwen3:8b`. Configure these server variables before restarting Ollama:
+
+| Variable | Value |
+| --- | --- |
+| `OLLAMA_MAX_LOADED_MODELS` | `1` |
+| `OLLAMA_NUM_PARALLEL` | `1` |
+
+On Windows with the desktop application, quit Ollama from its tray menu, add the variables in **Edit environment variables for your account**, then start Ollama again from the Start menu.
+
+For a terminal-managed Windows server, stop the existing server and run in a separate PowerShell window:
 
 ```powershell
 $env:OLLAMA_MAX_LOADED_MODELS = '1'
@@ -44,13 +52,50 @@ $env:OLLAMA_NUM_PARALLEL = '1'
 ollama serve
 ```
 
-Keep that window open while running the testbed from another window. Use one server-start method; do not start a second server on the same port.
+For a terminal-managed Linux server, stop the existing server and run in a separate terminal:
 
-Official setup reference: [Ollama FAQ](https://docs.ollama.com/faq).
+```bash
+OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_NUM_PARALLEL=1 ollama serve
+```
 
-## 3. Check the testbed configuration
+For an existing Linux systemd service, use a service override instead of launching a second server:
 
-`configs/stage2.yaml` already contains the required defaults:
+```bash
+sudo systemctl edit ollama.service
+```
+
+Add and save:
+
+```ini
+[Service]
+Environment="OLLAMA_MAX_LOADED_MODELS=1"
+Environment="OLLAMA_NUM_PARALLEL=1"
+```
+
+Then restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama.service
+```
+
+Use the method appropriate to your installation, and avoid two servers on port 11434. Keep a terminal-managed server window open. Official reference: [Ollama FAQ](https://docs.ollama.com/faq).
+
+Check connectivity on Windows:
+
+```powershell
+Invoke-RestMethod http://localhost:11434/api/version
+```
+
+On Linux:
+
+```bash
+curl http://localhost:11434/api/version
+```
+
+## 3. Check model settings
+
+All experiment files use these settings, explicitly or through validated defaults:
 
 ```yaml
 model:
@@ -63,69 +108,113 @@ model:
   temperature: 0.2
 ```
 
-Leave these settings as they are when Ollama runs locally on its default port. Change only `model.base_url` if your server uses a different address or port. Keep the rest of the configuration file intact.
+Leave them unchanged for local Ollama on the default port. Change `model.base_url` in the chosen configuration only if the address differs. The runner records the exact installed digest/version and never downloads a model. Verify the installed model/server supports structured outputs and thinking disabled.
 
-The default `experiment.mode` is `scripted_fixture`. The command below overrides it for a live run without editing the file. To make live execution the default, change `experiment.mode` to `live`.
+The live prompts contain document text and exact document-ID metadata. Workers copy the supplied ID; they do not guess it. Fixture answers and checker totals are not supplied to the model.
 
-## 4. Run the workflow using Qwen3
+## 4. Run Stage 3
 
-From the project folder:
+On Linux, run these sequentially:
 
-```powershell
-.venv/Scripts/python.exe -m testbed --mode live
+```bash
+.venv/bin/python -m testbed --config configs/stage3.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage3_delayed.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage3_three_workers.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage3_premature.yaml --mode live
 ```
 
-The system discovers the Ollama version and exact model digest, then runs the three-agent workflow. Two agents independently extract facts from the departmental order document. The third uses a deterministic tool to calculate the total when their results agree.
+On Windows:
 
-Agents execute asynchronously, with model inference restricted to one shared serving slot. Run one experiment at a time and avoid other requests to the model during research runs. Seeds do not guarantee identical live responses.
+```powershell
+.venv/Scripts/python.exe -m testbed --config configs/stage3.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage3_delayed.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage3_three_workers.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage3_premature.yaml --mode live
+```
 
-The program prints the new run directory and a `passed` flag. Exit code `0` means the workflow completed, its answer was correct, and its trace passed validation. Exit code `1` means at least one of those checks failed; inspect the saved records.
+Do not chain experiments with `&&` if later commands must run after an intentional task failure. Each invocation creates a separate run folder.
 
-## 5. Inspect the saved results
-
-Each execution writes to `runs/run_<unique-id>/`:
-
-| File or folder | Contents |
+| Configuration | Expected behavior |
 | --- | --- |
-| `manifest.json` | Execution mode, model digest, server version, machine/dependency details, and run status |
-| `config.resolved.yaml` | Actual configuration used, including the live-mode override |
-| `task_contract.json` | Task description and correctness requirements |
-| `events.jsonl` | Actions, timestamps, statuses, payload references, and explicit dependencies |
-| `payloads/` | Actual tool/model inputs and outputs, including captured responses |
-| `final_output.json` | Final workflow result |
-| `trace_validation.json` | Trace integrity checks |
-| `resource_metrics.csv` | CPU, RAM, process memory, and available NVIDIA metrics |
-| `observed_dependencies.json` | Explicit recorded event relationships |
-| `model_responses.jsonl` | Successful captured responses for exact-match replay |
-| `private/outcome_assessment.json` | Task correctness, contract violations, model outcomes, and infrastructure failures |
+| `stage3.yaml` | Two workers and one aggregator; all results required; quantity 10 and cost 1475 cents |
+| `stage3_delayed.yaml` | Same task with delayed worker-2 delivery; join still waits for both results |
+| `stage3_three_workers.yaml` | Three workers and one aggregator; quantity 12 and cost 2900 cents |
+| `stage3_premature.yaml` | Explicit premature release after one result; expected task failure |
 
-The supplied task's expected quantity is `7`, unit price is `125` cents, and total is `875` cents. A successful run also requires independent approval.
+In the premature experiment, worker 2's message is held until the named aggregation action finishes, then delivered without consumption. Its join fault must be explicitly enabled; ordinary joins always wait for all inputs or record a timeout. Worker facts are model-generated; aggregation arithmetic is deterministic.
 
-Private records remain separate from evidence for a future diagnostic method. Live behavior must be verified on the target machine; local fixture tests do not establish live model performance.
+Agents execute asynchronously, with model inference restricted to one shared serving slot. Run one experiment at a time and avoid competing client requests. Seeds do not guarantee identical live outputs. `python -m testbed` defaults to `configs/stage3.yaml`, still in fixture mode unless overridden. To default a selected file to live execution, change `experiment.mode` to `live` in that YAML file.
 
-## 6. Optional engineering checks and replay
+## 5. Interpret the console result
 
-Run the tests or a fixture workflow without calling a model:
+The console includes `run_directory`, `passed`, execution mode, `status`, `task_correctness` and `trace_validity`.
 
-```powershell
-.venv/Scripts/python.exe -m unittest discover -s tests -v
-.venv/Scripts/python.exe -m testbed --mode scripted_fixture
+- `passed: true`, exit code 0: completed workflow, correct output and valid trace.
+- `passed: false`, exit code 1: one or more checks failed; evidence is preserved.
+- For the premature example, **completed runtime, failed task and valid trace are expected**. Check the private injection manifest for actual activation. The `passed` flag evaluates the task, not whether a failure experiment was successfully demonstrated.
+
+Normal, delayed and three-worker live runs should succeed when Qwen3 extracts the facts correctly. Live model mistakes can still fail a task; fixture success alone does not establish live success.
+
+## 6. Inspect the run folder
+
+Each `runs/run_<id>/` contains:
+
+| File/folder | Contents |
+| --- | --- |
+| `manifest.json` | Stage/mode, model digest, server version, machine/dependencies, status and correctness |
+| `config.resolved.yaml` | Actual configuration, including live override |
+| `task_contract.json` | Required documents and correct totals, without fixture answers |
+| `events.jsonl` | Actions, timings, payload references and typed dependencies |
+| `payloads/` | Actual messages, facts, requests, responses and tool inputs/outputs |
+| `final_output.json` | Included document/result IDs, facts and totals |
+| `trace_validation.json` | Structural and message/join/consumption checks |
+| `observed_dependencies.json` | Explicit observed links, without causal attribution |
+| `resource_metrics.csv` | Runtime-machine CPU, RAM, process RSS and available NVIDIA metrics |
+| `model_responses.jsonl` | Successful captured responses for replay |
+| `private/injection_manifest.json` | Target, activation, injection event and experimental outcome |
+| `private/outcome_assessment.json` | Correctness, contract violations, model/infrastructure errors |
+| `private/reference_labels.json` | Unreviewed labels; no confirmed causal attribution |
+
+Joins distinguish required branches, completed computations, delivered/available branches and accepted inputs. In the premature example, worker 2's delivery must follow the completed `aggregate_orders` action, with no consumption event for that result. Actual event evidence establishes the order; configuration only specifies the intended order.
+
+Keep private records and resolved experimental conditions out of future diagnostic inputs. An injected event is not automatically a confirmed root cause.
+
+## 7. Fixtures, replay and Stage 2
+
+Model-free checks on Linux:
+
+```bash
+.venv/bin/python -m testbed --config configs/stage3.yaml --mode scripted_fixture
+.venv/bin/python -m testbed --config configs/stage3_premature.yaml --mode scripted_fixture
 ```
 
-To replay responses from a previous live run, replace `run_<live-id>` with its actual directory name:
+Windows uses `.venv/Scripts/python.exe`. The second command intentionally exits with code 1.
 
-```powershell
-.venv/Scripts/python.exe -m testbed --mode recorded_response --replay-directory runs/run_<live-id>
+Replay a previous live run using the corresponding configuration and actual directory name:
+
+```bash
+.venv/bin/python -m testbed --config configs/stage3.yaml --mode recorded_response --replay-directory runs/run_<live-id>
 ```
 
-Replay requires a live source run and exact matching of agent, step, model digest, assembled request, and settings. A changed prompt or setting produces an explicit mismatch instead of silently reusing another response. A fixture run cannot be used as the source for recorded-response mode.
+Replay requires a live source and exact matching of agent, step, model digest, request and settings. Changed prompts, seeds or settings cause explicit mismatches. Fixtures cannot be replay sources. The deterministic aggregator does not need a model response.
+
+The original Stage 2 workflow remains available:
+
+```bash
+.venv/bin/python -m testbed --config configs/stage2.yaml --mode live
+```
+
+It independently extracts/checks one document and requires approval; its expected total is 875 cents.
 
 ## Troubleshooting
 
-- **Connection refused:** Ensure Ollama is running and `model.base_url` matches its address. Check the `/api/version` command above.
-- **Model not found:** Confirm `ollama list` includes `qwen3:8b` with that exact name.
-- **Malformed output, truncated response, or thinking output:** Inspect `events.jsonl` and captured payloads. The runner records these failures and does not silently repair or regenerate the answer. Verify that the installed Ollama/model supports structured outputs and `think: false`.
-- **Timeout:** The default run timeout is 600 seconds. Inspect timings and machine resources before changing `runtime.run_timeout_seconds` in the YAML configuration.
-- **Missing GPU metrics:** NVIDIA measurements require an available `nvidia-smi`; unavailable GPU data is recorded explicitly. CPU and RAM measurements are still collected.
+- **Connection refused:** Start Ollama, check `/api/version` and `model.base_url`.
+- **Model missing:** Confirm `qwen3:8b` appears exactly in `ollama list`.
+- **Normal run fails correctness:** Inspect facts in `final_output.json` and `model_responses.jsonl`, then the private outcome assessment. Runtime completion is separate from task correctness.
+- **Premature run fails correctness:** Expected if the trace is valid and private records confirm activation; inspect these fields before treating it as infrastructure failure.
+- **Malformed/truncated/thinking output:** Inspect saved model events/responses; the runner does not repair or regenerate answers silently.
+- **Join timeout:** Inspect completed/delivered/accepted branches. Join timeout defaults to 300 seconds and overall timeout to 600. Review timings/resources before changing them.
+- **Replay mismatch:** Use the correct task and unchanged request settings; old prompts cannot match changed requests.
+- **Missing GPU metrics:** Requires available `nvidia-smi`; CPU/RAM still work. Local monitoring does not measure a remote server's GPU.
 
-This guide runs Stage 2 only. Calibration, message transport, experimental joins, shared-state races, controlled faults, corrections, retries, and pilot collection remain outside this implementation stage.
+General scheduling/versioned state, other fault families, corrections/retries, causal attribution and pilot collection remain later-stage work.

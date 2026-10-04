@@ -1,0 +1,10 @@
+experiment:
+  name: parallel_aggregation_three_workers
+  task_id: aggregation_002
+  mode: scripted_fixture
+  seed: 42
+runtime:
+  agents: 4
+workflow:
+  template: parallel_aggregation
+  join_release_condition: all_inputs

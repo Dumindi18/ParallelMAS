@@ -1,0 +1,28 @@
+experiment:
+  name: parallel_aggregation_premature
+  task_id: aggregation_001
+  mode: scripted_fixture
+  seed: 42
+runtime:
+  agents: 3
+  max_steps_per_agent: 8
+  run_timeout_seconds: 600
+workflow:
+  template: parallel_aggregation
+  join_release_condition: premature
+  premature_after_results: 1
+  join_timeout_seconds: 300
+  hold_branch_until_aggregation: agent_worker_2
+fault:
+  enabled: true
+  family: premature_join
+  target_join: department_orders
+  max_activations: 1
+model:
+  base_url: http://localhost:11434
+  name: qwen3:8b
+  inference_slots: 1
+  num_ctx: 4096
+  num_predict: 384
+  think: false
+  temperature: 0.2

@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
-from .schema import DependencyRef, Event, PayloadRef
+from .schema import DependencyRef, Event, PayloadRef, Message
 
 
 def utc_now():
@@ -91,4 +91,121 @@ def validate_trace(directory):
     for statuses in operations.values():
         if len(statuses) != 2 or statuses[0] != "started" or statuses[1] == "started":
             errors.append("operation missing start or terminal event")
+    errors.extend(validate_message_evidence(directory, events))
     return {"valid": not errors, "event_count": len(events), "errors": errors}
+
+
+def validate_message_evidence(directory, events):
+    """Validate observed lifecycle and accepted inputs, never require consumption of late messages."""
+    errors = []
+    by_id = {event.event_id: event for event in events}
+    sent, delivered, received, consumed = {}, {}, {}, {}
+    joins, aggregation_inputs = [], []
+    for event in events:
+        if event.status != "completed":
+            continue
+        if event.event_type == "join":
+            joins.append(event)
+        if event.event_type == "tool_call" and event.step_id == "aggregate_orders":
+            try:
+                arguments = json.loads((directory / "payloads" / f"{event.input_refs[0].payload_id}.json").read_text(encoding="utf-8"))
+                aggregation_inputs.append((event, arguments["results"]))
+            except (OSError, ValueError, KeyError, IndexError):
+                errors.append("invalid aggregation inputs")
+        if event.event_type not in {"message_sent", "message_delivered", "message_received", "message_consumed"}:
+            continue
+        try:
+            message = Message.model_validate({key: event.details[key] for key in Message.model_fields})
+            source = by_id[message.source_event_id]
+            if source.status != "completed" or source.agent_id != message.sender_id:
+                errors.append("message has invalid producer")
+            data = json.loads((directory / "payloads" / f"{message.payload_reference.payload_id}.json").read_text(encoding="utf-8"))
+            if digest(data) != message.payload_reference.sha256:
+                errors.append("message payload hash mismatch")
+            if not any(ref == message.payload_reference for ref in source.output_refs):
+                # Sender preserves the actual produced value but may give its payload a new identifier.
+                source_values = [json.loads((directory / "payloads" / f"{ref.payload_id}.json").read_text(encoding="utf-8")) for ref in source.output_refs]
+                if data not in source_values:
+                    errors.append("message payload differs from producer output")
+            message_id = message.message_id
+            registry = {"message_sent": sent, "message_delivered": delivered,
+                        "message_received": received, "message_consumed": consumed}[event.event_type]
+            if message_id in registry:
+                errors.append(f"duplicate {event.event_type}")
+            if event.event_type == "message_sent" and event.agent_id != message.sender_id:
+                errors.append("message sender actor mismatch")
+            if event.event_type in {"message_received", "message_consumed"} and event.agent_id != message.receiver_id:
+                errors.append("message receiver actor mismatch")
+            if event.event_type != "message_sent":
+                if message_id not in sent or event.details.get("send_event_id") != sent[message_id].event_id:
+                    errors.append("message has missing or incorrect send reference")
+                elif any(event.details[key] != sent[message_id].details[key] for key in Message.model_fields):
+                    errors.append("message envelope changed in transit")
+            if event.event_type in {"message_received", "message_consumed"}:
+                if message_id not in delivered or event.details.get("delivery_event_id") != delivered[message_id].event_id:
+                    errors.append("message has missing or incorrect delivery reference")
+            if event.event_type == "message_consumed":
+                if message_id not in received or event.details.get("receive_event_id") != received[message_id].event_id:
+                    errors.append("message consumed without matching receive")
+            link = {"message_sent": (message.source_event_id, "produced_output"),
+                    "message_delivered": (event.details.get("send_event_id"), "message_send_delivery"),
+                    "message_received": (event.details.get("delivery_event_id"), "message_delivery_receive"),
+                    "message_consumed": (event.details.get("delivery_event_id"), "message_delivery_consumption")}[event.event_type]
+            if not any((dep.event_id, dep.relationship) == link for dep in event.dependency_refs):
+                errors.append("message lifecycle dependency missing")
+            registry[message_id] = event
+        except (OSError, ValueError, KeyError, IndexError):
+            errors.append("invalid message lifecycle evidence")
+    for join in joins:
+        details = join.details
+        required = details.get("required_branches", [])
+        accepted = details.get("accepted_result_ids", [])
+        if len(accepted) != len(set(accepted)):
+            errors.append("join accepted duplicate result")
+        branches = []
+        for message_id in accepted:
+            if message_id not in received or received[message_id].monotonic_ns > join.monotonic_ns:
+                errors.append("join accepted an unavailable result")
+            else:
+                branches.append(received[message_id].details["sender_id"])
+        if len(branches) != len(set(branches)) or set(branches) - set(required):
+            errors.append("join has unexpected/duplicate branch")
+        if set(details.get("missing_branches", [])) != set(required) - set(branches):
+            errors.append("join missing-branch evidence inconsistent")
+        if details.get("release_reason") == "all_required_inputs" and set(branches) != set(required):
+            errors.append("standard join released without all inputs")
+        source_ids = {sent[mid].details["source_event_id"] for mid in accepted if mid in sent}
+        observed = {dep.event_id for dep in join.dependency_refs if dep.relationship == "accepted_branch_result"}
+        if source_ids != observed:
+            errors.append("join accepted dependencies inconsistent")
+    used = set()
+    for event, results in aggregation_inputs:
+        accepted_joins = [join for join in joins if any(dep.event_id == join.event_id for dep in event.dependency_refs)]
+        if len(accepted_joins) != 1 or set(result.get("message_id") for result in results) != set(accepted_joins[0].details["accepted_result_ids"]):
+            errors.append("aggregation results do not match accepted join inputs")
+        for result in results:
+            try:
+                message_id = result["message_id"]
+                if message_id in used:
+                    errors.append("aggregation used a result twice")
+                used.add(message_id)
+                consumption = consumed[message_id]
+                if consumption.monotonic_ns > event.monotonic_ns or not any(dep.event_id == consumption.event_id for dep in event.dependency_refs):
+                    errors.append("aggregation missing consumption dependency")
+                if consumption.details["sender_id"] != result["branch_id"]:
+                    errors.append("aggregation branch mismatch")
+                payload = consumption.details["payload_reference"]["payload_id"]
+                facts = json.loads((directory / "payloads" / f"{payload}.json").read_text(encoding="utf-8"))
+                if facts != result["facts"]:
+                    errors.append("aggregation did not use consumed payload")
+            except (OSError, ValueError, KeyError):
+                errors.append("aggregation result lacks valid consumption")
+    if set(consumed) != used:
+        # Failed/cancelled aggregation may have assembled an input without producing an output.
+        aggregate_failed = any(e.step_id == "aggregate_orders" and e.status in {"failed", "cancelled", "timed_out"} for e in events)
+        if not aggregate_failed:
+            errors.append("consumption has no matching aggregation use")
+    run_completed = any(e.event_type == "run" and e.status == "completed" for e in events)
+    if run_completed and set(sent) != set(delivered):
+        errors.append("completed run has undelivered sent messages")
+    return errors

@@ -1,0 +1,13 @@
+{
+  "task_id": "aggregation_001",
+  "description": "Collect separate departmental order facts and aggregate every required document exactly once.",
+  "documents": [
+    {"document_id": "department_A", "document": "Department A ordered 7 notebooks. The unit price is 125 cents. No other items were ordered."},
+    {"document_id": "department_B", "document": "Department B ordered 3 folders. Each folder costs 200 cents. No other items were ordered."}
+  ],
+  "requirements": {"required_document_ids": ["department_A", "department_B"], "total_quantity": 10, "total_cost_cents": 1475},
+  "fixture_facts": [
+    {"document_id": "department_A", "quantity": 7, "unit_cost_cents": 125},
+    {"document_id": "department_B", "quantity": 3, "unit_cost_cents": 200}
+  ]
+}
