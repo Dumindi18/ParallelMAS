@@ -16,6 +16,8 @@ from .runtime import PROMPT_VERSION, Runtime, workflow
 from .evaluation import check_outcome
 from .schema import Config
 from .aggregation import ParallelRuntime, parallel_workflow, JoinTimeout
+from .shared_state import SharedStateRuntime, shared_record_workflow, ORDER_PROMPT_VERSION
+from .scheduling import ScheduleTimeout
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,8 +59,8 @@ async def run(config, output_root):
     recorder = Recorder(directory, run_id)
     (directory / "config.resolved.yaml").write_text(yaml.safe_dump(config.model_dump()), encoding="utf-8")
     task = json.loads((ROOT / "tasks" / f"{config.experiment.task_id}.json").read_text(encoding="utf-8"))
-    save_json(directory / "task_contract.json", {key: value for key, value in task.items() if key != "fixture_facts"})
-    stage = 3 if config.workflow.template == "parallel_aggregation" else 2
+    save_json(directory / "task_contract.json", {key: value for key, value in task.items() if key not in {"fixture_facts", "fixture_decisions"}})
+    stage = {"stage2_facts": 2, "parallel_aggregation": 3, "shared_record": 4}[config.workflow.template]
     manifest = {"run_id": run_id, "stage": stage, "execution_mode": config.experiment.mode,
                 "status": "started", "start_time_utc": utc_now(), "end_time_utc": None,
                 "code_commit": command_output(["git", "rev-parse", "HEAD"]),
@@ -66,7 +68,7 @@ async def run(config, output_root):
                 "dependency_versions": {p: importlib.metadata.version(p) for p in ["httpx", "pydantic", "PyYAML", "psutil"]},
                 "machine": {"system": platform.platform(), "python": platform.python_version(),
                             "cpu_count": psutil.cpu_count(), "ram_total_bytes": psutil.virtual_memory().total},
-                "prompt_versions": {"extract_facts": PROMPT_VERSION}, "ollama_version": None, "model_digest": None,
+                "prompt_versions": {"interpret_order": ORDER_PROMPT_VERSION} if stage == 4 else {"extract_facts": PROMPT_VERSION}, "ollama_version": None, "model_digest": None,
                 "concurrency_description": "Agents execute asynchronously, with model inference restricted to one shared serving slot.",
                 "model_generation_measured": False}
     save_json(directory / "manifest.json", manifest)
@@ -82,10 +84,16 @@ async def run(config, output_root):
     try:
         async with asyncio.timeout(config.runtime.run_timeout_seconds):
             model = SharedModel(config.model, config.experiment.mode, config.experiment.replay_directory)
-            runtime = ParallelRuntime(config, recorder, model) if stage == 3 else Runtime(config, recorder, model)
+            runtime = (SharedStateRuntime(config, recorder, model) if stage == 4 else
+                       ParallelRuntime(config, recorder, model) if stage == 3 else Runtime(config, recorder, model))
+            if stage == 4:
+                save_json(directory / "private" / "schedule_plan.json", {
+                    "mode": config.schedule.mode, "profile": config.schedule.profile,
+                    "ordered_checkpoints": runtime.scheduler.plan})
             await model.initialize()
             manifest.update(model_digest=model.model_digest, ollama_version=model.ollama_version)
-            output, agents = await (parallel_workflow(runtime, task) if stage == 3 else workflow(runtime, task))
+            output, agents = await (shared_record_workflow(runtime, task) if stage == 4 else
+                                   parallel_workflow(runtime, task) if stage == 3 else workflow(runtime, task))
             manifest["agents"] = [{"agent_id": a.agent_id, "role": a.role, "status": a.status,
                                    "actions": a.actions, "local_sequence": a.local_sequence} for a in agents]
     except ModelFailure as exc:
@@ -93,6 +101,9 @@ async def run(config, output_root):
         status = "failed"
     except JoinTimeout:
         infrastructure.append("join_timeout")
+        status = "timed_out"
+    except ScheduleTimeout:
+        infrastructure.append("schedule_gate_timeout")
         status = "timed_out"
     except TimeoutError:
         infrastructure.append("run_timeout")
@@ -110,6 +121,14 @@ async def run(config, output_root):
             infrastructure.append("resource_monitor: " + str(exc))
             status = "failed"
     from .schema import DependencyRef
+    if isinstance(runtime, SharedStateRuntime):
+        save_json(directory / "state_history.json", {"records": runtime.state.history(task["key"])})
+        save_json(directory / "observed_schedule.json", {"checkpoints": runtime.scheduler.observed})
+        schedule_assessment = runtime.scheduler.assessment()
+        save_json(directory / "private" / "schedule_assessment.json", schedule_assessment)
+        if status == "completed" and not schedule_assessment["constraints_satisfied"]:
+            infrastructure.append("schedule_not_reproduced")
+            status = "failed"
     recorder.emit("controller", "run", "run", status, operation, attempt,
                   outputs=[recorder.payload(output)],
                   dependencies=[DependencyRef(event_id=begin.event_id, relationship="operation_start")],
@@ -121,11 +140,12 @@ async def run(config, output_root):
     assessment.update(trace_validity=validation["valid"], infrastructure_failures=infrastructure,
                       model_outcomes=model_outcomes, execution_mode=config.experiment.mode)
     save_json(directory / "private" / "outcome_assessment.json", assessment)
-    injection = runtime.injection if isinstance(runtime, ParallelRuntime) else {"enabled": False, "status": "not_requested"}
+    injection = runtime.injection if isinstance(runtime, (ParallelRuntime, SharedStateRuntime)) else {"enabled": False, "status": "not_requested"}
     if injection.get("enabled"):
         injection["status"] = ("invalid_infrastructure" if infrastructure else
                                "activated_and_task_failed" if injection["activated"] and assessment["task_correctness"] == "failure" else
-                               "activated_harmless" if injection["activated"] else "not_activated")
+                               "activated_harmless" if injection["activated"] and assessment["task_correctness"] == "success" else
+                               "activated_outcome_unknown" if injection["activated"] else "not_activated")
     save_json(directory / "private" / "injection_manifest.json", {**injection, "stage": stage})
     save_json(directory / "private" / "reference_labels.json", {
         "task_outcome": assessment["task_correctness"], "injection_status": injection["status"],
@@ -144,8 +164,8 @@ async def run(config, output_root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 3 parallel aggregation; defaults to model-free scripted fixtures")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage3.yaml")
+    parser = argparse.ArgumentParser(description="Stage 4 scheduling and shared state; defaults to model-free scripted fixtures")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage4.yaml")
     parser.add_argument("--output-root", type=Path, default=ROOT / "runs")
     parser.add_argument("--mode", choices=["scripted_fixture", "live", "recorded_response"])
     parser.add_argument("--replay-directory")

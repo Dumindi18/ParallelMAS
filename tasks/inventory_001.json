@@ -1,0 +1,12 @@
+{
+  "task_id": "inventory_001",
+  "description": "Two agents reserve separate valid orders against one inventory record; preserve both updates.",
+  "key": "inventory.item_A",
+  "initial_value": {"available_quantity": 10, "accepted_orders": []},
+  "orders": [
+    {"order_id": "order_A", "document": "Order order_A requests 3 units of inventory.item_A."},
+    {"order_id": "order_B", "document": "Order order_B requests 4 units of inventory.item_A."}
+  ],
+  "requirements": {"expected_available_quantity": 3, "required_orders": [{"order_id": "order_A", "quantity": 3}, {"order_id": "order_B", "quantity": 4}], "require_current_at_read": true},
+  "fixture_decisions": [{"order_id": "order_A", "quantity": 3}, {"order_id": "order_B", "quantity": 4}]
+}

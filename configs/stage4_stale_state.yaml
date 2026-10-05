@@ -1,0 +1,18 @@
+experiment:
+  name: inventory_stale_snapshot
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: unconditional
+schedule:
+  mode: controlled
+  profile: a_then_b
+fault:
+  enabled: true
+  family: stale_state
+  target_key: inventory.item_A
+  target_agent: agent_updater_B
+  stale_version: 0
+  max_activations: 1

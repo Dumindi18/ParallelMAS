@@ -20,7 +20,7 @@ class Agent:
 
 
 class Runtime:
-    """Agents use these wrappers; Stage 3 will add transport and joins."""
+    """Instrumented action foundation used by all implemented workflow templates."""
     def __init__(self, config, recorder, model):
         self.config, self.recorder, self.model = config, recorder, model
 
@@ -35,10 +35,12 @@ class Runtime:
         begin = self.recorder.emit(agent.agent_id, step, kind, "started", operation, attempt,
                                    inputs=[input_ref], dependencies=dependencies, **evidence)
         dependencies = [*dependencies, DependencyRef(event_id=begin.event_id, relationship="operation_start")]
+        evidence["_terminal_event_id"] = uuid4().hex
         try:
             result = await function(evidence)
             dependencies.extend(evidence.pop("_dependencies", []))
             extra_inputs = evidence.pop("_input_refs", [])
+            terminal_event_id = evidence.pop("_terminal_event_id")
             value = result.model_dump() if hasattr(result, "model_dump") else result
             output = self.recorder.payload(value)
             evidence_refs = []
@@ -47,18 +49,20 @@ class Runtime:
                 evidence["response_ref"] = raw.model_dump()
                 evidence_refs.append(raw)
             end = self.recorder.emit(agent.agent_id, step, kind, "completed", operation, attempt,
-                                     inputs=[input_ref, *extra_inputs], outputs=[output, *evidence_refs], dependencies=dependencies, **evidence)
+                                     inputs=[input_ref, *extra_inputs], outputs=[output, *evidence_refs], dependencies=dependencies,
+                                     event_id=terminal_event_id, **evidence)
             return result, end, output
         except BaseException as exc:
             status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "timed_out" if isinstance(exc, TimeoutError) else "failed"
             dependencies.extend(evidence.pop("_dependencies", []))
             extra_inputs = evidence.pop("_input_refs", [])
+            terminal_event_id = evidence.pop("_terminal_event_id", None)
             outputs = []
             if "response" in evidence:
                 outputs.append(self.recorder.payload(evidence.pop("response")))
             self.recorder.emit(agent.agent_id, step, kind, status, operation, attempt,
                                inputs=[input_ref, *extra_inputs], outputs=outputs, dependencies=dependencies,
-                               error_type=type(exc).__name__, error=str(exc), **evidence)
+                               error_type=type(exc).__name__, error=str(exc), event_id=terminal_event_id, **evidence)
             agent.status = status
             raise
         finally:
@@ -74,6 +78,14 @@ class Runtime:
         agent.context = [{"role": "system", "content": agent.role + " Return only JSON with document_id, quantity, unit_cost_cents. The input contains document_id metadata and document text. Copy document_id exactly from the metadata; do not infer or rename it. Extract quantity and unit_cost_cents from the document text; do not invent values."},
                          {"role": "user", "content": canonical(document).decode("utf-8")}]
         body = self.model.request(agent.context, self.config.experiment.seed)
+        return await self._model_action(agent, step, body, fixture, dependencies)
+
+    async def call_structured_model(self, agent, step, messages, fixture, response_model, dependencies=()):
+        agent.context = messages
+        body = self.model.request(messages, self.config.experiment.seed, response_model)
+        return await self._model_action(agent, step, body, fixture, dependencies)
+
+    async def _model_action(self, agent, step, body, fixture, dependencies):
         async def invoke(evidence):
             return await self.model.generate(body, agent.agent_id, step, fixture, evidence)
         result = await self.action(agent, step, "model_request", body, invoke, dependencies,

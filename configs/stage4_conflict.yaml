@@ -1,0 +1,12 @@
+experiment:
+  name: inventory_compare_and_set_conflict
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+  max_additional_retries: 0
+schedule:
+  mode: controlled
+  profile: both_read_before_writes

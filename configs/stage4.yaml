@@ -1,0 +1,20 @@
+experiment:
+  name: inventory_reference
+  task_id: inventory_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+  max_additional_retries: 0
+schedule:
+  mode: controlled
+  profile: a_then_b
+model:
+  base_url: http://localhost:11434
+  name: qwen3:8b
+  inference_slots: 1
+  num_ctx: 4096
+  num_predict: 384
+  think: false
+  temperature: 0.2
