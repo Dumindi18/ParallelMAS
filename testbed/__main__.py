@@ -18,6 +18,7 @@ from .schema import Config
 from .aggregation import ParallelRuntime, parallel_workflow, JoinTimeout
 from .shared_state import SharedStateRuntime, shared_record_workflow, ORDER_PROMPT_VERSION
 from .scheduling import ScheduleTimeout
+from .correction import CorrectionRuntime, correction_workflow, PLAN_PROMPT_VERSION
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,8 +60,12 @@ async def run(config, output_root):
     recorder = Recorder(directory, run_id)
     (directory / "config.resolved.yaml").write_text(yaml.safe_dump(config.model_dump()), encoding="utf-8")
     task = json.loads((ROOT / "tasks" / f"{config.experiment.task_id}.json").read_text(encoding="utf-8"))
-    save_json(directory / "task_contract.json", {key: value for key, value in task.items() if key not in {"fixture_facts", "fixture_decisions"}})
-    stage = {"stage2_facts": 2, "parallel_aggregation": 3, "shared_record": 4}[config.workflow.template]
+    save_json(directory / "task_contract.json", {key: value for key, value in task.items() if not key.startswith("fixture_")})
+    shared = config.workflow.template == "shared_record"
+    correction = config.workflow.template == "plan_correction"
+    stage = {"stage2_facts": 2, "parallel_aggregation": 3, "shared_record": 4, "plan_correction": 5}[config.workflow.template]
+    if config.workflow.max_additional_retries:
+        stage = 5
     manifest = {"run_id": run_id, "stage": stage, "execution_mode": config.experiment.mode,
                 "status": "started", "start_time_utc": utc_now(), "end_time_utc": None,
                 "code_commit": command_output(["git", "rev-parse", "HEAD"]),
@@ -68,7 +73,8 @@ async def run(config, output_root):
                 "dependency_versions": {p: importlib.metadata.version(p) for p in ["httpx", "pydantic", "PyYAML", "psutil"]},
                 "machine": {"system": platform.platform(), "python": platform.python_version(),
                             "cpu_count": psutil.cpu_count(), "ram_total_bytes": psutil.virtual_memory().total},
-                "prompt_versions": {"interpret_order": ORDER_PROMPT_VERSION} if stage == 4 else {"extract_facts": PROMPT_VERSION}, "ollama_version": None, "model_digest": None,
+                "prompt_versions": ({"interpret_order": ORDER_PROMPT_VERSION} if shared else
+                                    {"select_plan": PLAN_PROMPT_VERSION} if correction else {"extract_facts": PROMPT_VERSION}), "ollama_version": None, "model_digest": None,
                 "concurrency_description": "Agents execute asynchronously, with model inference restricted to one shared serving slot.",
                 "model_generation_measured": False}
     save_json(directory / "manifest.json", manifest)
@@ -84,15 +90,17 @@ async def run(config, output_root):
     try:
         async with asyncio.timeout(config.runtime.run_timeout_seconds):
             model = SharedModel(config.model, config.experiment.mode, config.experiment.replay_directory)
-            runtime = (SharedStateRuntime(config, recorder, model) if stage == 4 else
+            runtime = (SharedStateRuntime(config, recorder, model) if shared else
+                       CorrectionRuntime(config, recorder, model) if correction else
                        ParallelRuntime(config, recorder, model) if stage == 3 else Runtime(config, recorder, model))
-            if stage == 4:
+            if shared:
                 save_json(directory / "private" / "schedule_plan.json", {
                     "mode": config.schedule.mode, "profile": config.schedule.profile,
                     "ordered_checkpoints": runtime.scheduler.plan})
             await model.initialize()
             manifest.update(model_digest=model.model_digest, ollama_version=model.ollama_version)
-            output, agents = await (shared_record_workflow(runtime, task) if stage == 4 else
+            output, agents = await (shared_record_workflow(runtime, task) if shared else
+                                   correction_workflow(runtime, task) if correction else
                                    parallel_workflow(runtime, task) if stage == 3 else workflow(runtime, task))
             manifest["agents"] = [{"agent_id": a.agent_id, "role": a.role, "status": a.status,
                                    "actions": a.actions, "local_sequence": a.local_sequence} for a in agents]
@@ -131,7 +139,9 @@ async def run(config, output_root):
             status = "failed"
     recorder.emit("controller", "run", "run", status, operation, attempt,
                   outputs=[recorder.payload(output)],
-                  dependencies=[DependencyRef(event_id=begin.event_id, relationship="operation_start")],
+                  dependencies=[DependencyRef(event_id=begin.event_id, relationship="operation_start"),
+                      *[DependencyRef(event_id=e.event_id, relationship="accepted_attempt") for e in recorder.events
+                        if e.event_type == "operation_result" and e.status == "completed"]],
                   infrastructure_failures=infrastructure, model_outcomes=model_outcomes)
     save_json(directory / "final_output.json", output)
     validation = validate_trace(directory)
@@ -144,6 +154,7 @@ async def run(config, output_root):
     if injection.get("enabled"):
         injection["status"] = ("invalid_infrastructure" if infrastructure else
                                "activated_and_task_failed" if injection["activated"] and assessment["task_correctness"] == "failure" else
+                               "activated_recovered" if injection["activated"] and assessment.get("recovered") else
                                "activated_harmless" if injection["activated"] and assessment["task_correctness"] == "success" else
                                "activated_outcome_unknown" if injection["activated"] else "not_activated")
     save_json(directory / "private" / "injection_manifest.json", {**injection, "stage": stage})
@@ -164,8 +175,8 @@ async def run(config, output_root):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 4 scheduling and shared state; defaults to model-free scripted fixtures")
-    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage4.yaml")
+    parser = argparse.ArgumentParser(description="Stage 5 correction and bounded retries; defaults to model-free scripted fixtures")
+    parser.add_argument("--config", type=Path, default=ROOT / "configs" / "stage5.yaml")
     parser.add_argument("--output-root", type=Path, default=ROOT / "runs")
     parser.add_argument("--mode", choices=["scripted_fixture", "live", "recorded_response"])
     parser.add_argument("--replay-directory")

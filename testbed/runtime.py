@@ -24,14 +24,16 @@ class Runtime:
     def __init__(self, config, recorder, model):
         self.config, self.recorder, self.model = config, recorder, model
 
-    async def action(self, agent, step, kind, inputs, function, dependencies=(), details=None):
+    async def action(self, agent, step, kind, inputs, function, dependencies=(), details=None,
+                     operation_id=None, attempt_number=1, previous_attempt=None):
         if agent.actions >= self.config.runtime.max_steps_per_agent:
             raise RuntimeError("agent_step_limit_exceeded")
         agent.actions += 1
         agent.current_step, agent.status = step, "running"
-        operation, attempt = uuid4().hex, uuid4().hex
+        operation, attempt = operation_id or uuid4().hex, uuid4().hex
         input_ref = self.recorder.payload(inputs)
         evidence = dict(details or {})
+        evidence.update(attempt_number=attempt_number, previous_attempt=previous_attempt)
         begin = self.recorder.emit(agent.agent_id, step, kind, "started", operation, attempt,
                                    inputs=[input_ref], dependencies=dependencies, **evidence)
         dependencies = [*dependencies, DependencyRef(event_id=begin.event_id, relationship="operation_start")]

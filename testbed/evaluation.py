@@ -4,6 +4,22 @@
 def check_outcome(task, output):
     if output is None:
         return {"task_correctness": "unknown", "execution_contract_violations": []}
+    if "options" in task:
+        selected = next((option for option in task["options"] if option["option_id"] == output["plan"]["option_id"]), None)
+        violations = []
+        if selected is None or selected["cost_cents"] > task["requirements"]["budget_cents"]:
+            violations.append("delivery_budget_violation")
+        if selected is None or selected["route"] in task["requirements"]["prohibited_routes"]:
+            violations.append("prohibited_route_used")
+        if task["requirements"]["approval_required_before_execution"]:
+            if not output["approval_consumed"] or output["plan"] != output["approved_plan"]:
+                violations.append("required_approved_plan_version_not_used")
+            if output["approved_plan"]["correction_required"] and not output["approval_consumed"]:
+                violations.append("required_correction_not_consumed")
+        if not output["executed"]:
+            violations.append("delivery_tool_failed_without_recovery")
+        return {"task_correctness": "failure" if violations else "success",
+                "execution_contract_violations": violations, "recovered": output["recovered"]}
     if "initial_value" in task:
         final = output["final_record"]
         orders = final["value"]["accepted_orders"]
@@ -27,7 +43,8 @@ def check_outcome(task, output):
         if task["requirements"]["require_current_at_read"] and any(item["read_version"] != item["current_version_at_read"] for item in output["updates"]):
             violations.append("stale_snapshot_used")
         correct = available == task["requirements"]["expected_available_quantity"] and not violations
-        return {"task_correctness": "success" if correct else "failure", "execution_contract_violations": violations}
+        return {"task_correctness": "success" if correct else "failure", "execution_contract_violations": violations,
+                "recovered": correct and any(item.get("recovered", False) for item in output["updates"])}
     if "documents" in task:
         required = task["requirements"]["required_document_ids"]
         included = output["included_document_ids"]

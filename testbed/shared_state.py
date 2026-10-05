@@ -1,5 +1,6 @@
 """Template C: two independent order updaters and one deterministic verifier."""
 import asyncio
+from uuid import uuid4
 from .faults import StateFaultController
 from .recording import canonical
 from .runtime import Agent, Runtime
@@ -7,6 +8,7 @@ from .schema import DependencyRef, OrderDecision
 from .scheduling import Scheduler
 from .state import VersionedState
 from .model import ModelFailure
+from .retries import retry_decision, accept_result
 
 ORDER_PROMPT_VERSION = "1.0"
 
@@ -46,7 +48,9 @@ class SharedStateRuntime(Runtime):
                 [*dependencies, DependencyRef(event_id=gate_id, relationship="schedule_order")])
         return await self.scheduler.execute(agent, step, action)
 
-    async def write_state(self, agent, proposal, read_event, proposal_event):
+    async def write_state(self, agent, proposal, read_event, proposal_event, operation_id=None,
+                          attempt_number=1, previous=None, decision_event=None):
+        step = "write_inventory" if attempt_number == 1 else "write_inventory_retry"
         async def invoke(evidence):
             result = await self.state.write(self.key, proposal["value"], proposal["base_version"],
                                              self.config.workflow.state_write_policy, evidence["_terminal_event_id"])
@@ -55,11 +59,16 @@ class SharedStateRuntime(Runtime):
             self.fault_controller.record_write(agent.agent_id, self.key, result, evidence["_terminal_event_id"])
             return result
         async def action(gate_id):
-            return await self.action(agent, "write_inventory", "state_write", proposal, invoke,
+            extra = [] if previous is None else [
+                DependencyRef(event_id=previous.event_id, relationship="failed_attempt_retry"),
+                DependencyRef(event_id=decision_event.event_id, relationship="retry_decision")]
+            return await self.action(agent, step, "state_write", proposal, invoke,
                 [DependencyRef(event_id=read_event.event_id, relationship="state_read_write"),
                  DependencyRef(event_id=proposal_event.event_id, relationship="produced_output"),
-                 DependencyRef(event_id=gate_id, relationship="schedule_order")])
-        return await self.scheduler.execute(agent, "write_inventory", action)
+                 DependencyRef(event_id=gate_id, relationship="schedule_order"), *extra],
+                operation_id=operation_id, attempt_number=attempt_number,
+                previous_attempt=previous.attempt_id if previous else None)
+        return await self.scheduler.execute(agent, step, action)
 
 
 async def shared_record_workflow(runtime, task):
@@ -90,16 +99,34 @@ async def shared_record_workflow(runtime, task):
             return {"key": current["key"], "base_version": current["version"],
                     "value": {"available_quantity": value["available_quantity"] - selected["quantity"],
                               "accepted_orders": [*value["accepted_orders"], selected]}}
-        proposal, proposal_event, _ = await runtime.call_tool(agent, "prepare_reservation", "inventory_reservation",
-            {"snapshot": record, "decision": decision.model_dump()}, propose,
-            [DependencyRef(event_id=read_event.event_id, relationship="produced_output"),
-             DependencyRef(event_id=decision_event.event_id, relationship="produced_output")])
-        result, write_event, _ = await runtime.write_state(agent, proposal, read_event, proposal_event)
+        logical_id = uuid4().hex
+        previous, retry_event = None, None
+        for number in range(1, runtime.config.workflow.max_additional_retries + 2):
+            proposal, proposal_event, _ = await runtime.call_tool(agent,
+                "prepare_reservation" if number == 1 else "prepare_reservation_retry", "inventory_reservation",
+                {"snapshot": record, "decision": decision.model_dump()}, propose,
+                [DependencyRef(event_id=read_event.event_id, relationship="produced_output"),
+                 DependencyRef(event_id=decision_event.event_id, relationship="produced_output")])
+            result, write_event, _ = await runtime.write_state(agent, proposal, read_event, proposal_event,
+                logical_id, number, previous, retry_event)
+            if result["accepted"]:
+                accept_result(runtime, write_event, True)
+                break
+            retry = number <= runtime.config.workflow.max_additional_retries
+            retry_event = retry_decision(runtime, write_event, result["rejection_reason"], retry)
+            if not retry:
+                accept_result(runtime, write_event, False, result["rejection_reason"])
+                break
+            previous = write_event
+            snapshot, read_event, _ = await runtime.read_state(agent, "read_inventory_retry",
+                [DependencyRef(event_id=retry_event.event_id, relationship="retry_decision")])
+            record = snapshot["record"]
         agent.status = "completed"
         return {"agent_id": agent.agent_id, "order": decision.model_dump(),
                 "read_version": record["version"], "current_version_at_read": snapshot["current_record"]["version"],
                 "write_accepted": result["accepted"], "write_event_id": write_event.event_id,
-                "rejection_reason": result["rejection_reason"]}
+                "rejection_reason": result["rejection_reason"], "attempts": number,
+                "recovered": result["accepted"] and number > 1}
 
     jobs = [asyncio.create_task(update(agent, order, fixture))
             for agent, order, fixture in zip(agents, task["orders"], task["fixture_decisions"])]

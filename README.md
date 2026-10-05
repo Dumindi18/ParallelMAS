@@ -1,6 +1,6 @@
-# ParallelMAS - Stages 2 through 4
+# ParallelMAS - Stages 2 through 5
 
-A lightweight asynchronous research testbed following section 15 of the supplied guide. Stage 2 provides the runtime, shared model wrapper, recorder and checker. Stage 3 adds parallel aggregation with message consumption and joins. **Stage 4 adds Template C: concurrent shared-record updates**, named asynchronous scheduling gates, version history, unconditional writes and compare-and-set. Calibration is omitted as requested.
+A lightweight asynchronous research testbed following section 15 of the supplied guide. Stage 2 provides the runtime, shared model wrapper, recorder and checker. Stage 3 adds Template A parallel aggregation. Stage 4 adds Template C versioned shared-record updates and named scheduling gates. **Stage 5 adds Template B plan checking, correction and dependent execution, plus bounded tool and inventory-conflict recovery.** Calibration is omitted as requested.
 
 The default is a model-free **scripted fixture**. Fixtures and mock HTTP tests are engineering evidence, not live Qwen3 research data. The development machine does not need a model.
 
@@ -24,7 +24,42 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The default configuration is now `configs/stage4.yaml`. YAML is validated with Pydantic; unknown settings and inconsistent task, schedule, write policy, agent count and fault conditions are rejected. Each run saves its fully resolved configuration. Defaults remain one inference slot, eight actions per agent maximum and a 600-second run timeout. Run experiments sequentially.
+The default configuration is now `configs/stage5.yaml`. YAML is validated with Pydantic; unknown settings and inconsistent task, schedule, write policy, agent count and fault conditions are rejected. Each run saves its fully resolved configuration. Defaults remain one inference slot, eight actions per agent maximum and a 600-second run timeout. Run experiments sequentially.
+
+## Stage 5 correction and retries
+
+Template B runs three agents asynchronously: a planner selects a structured delivery option, a checker examines the budget and prohibited-route constraints, and an executor performs a bounded local mock delivery. The checker explicitly approves version 1 or sends a corrected version 2. The executor's normal policy waits for and consumes that approval/correction before execution. The task contract states whether prior approval is required; a compliant early action is permitted only in the separate optional-approval task.
+
+The planner uses the shared Qwen wrapper in live mode. The checker and delivery tool use deterministic local code. All initial plans, approvals and corrections pass through the existing per-recipient queues and instrumented send/delivery/receive/consumption wrappers. Tool inputs preserve the selected plan, the initial version it references and whether approval was consumed. Delivery alone never becomes a consumption edge.
+
+```powershell
+.venv/Scripts/python.exe -m testbed
+.venv/Scripts/python.exe -m testbed --config configs/stage5_tool_recovery.yaml
+.venv/Scripts/python.exe -m testbed --config configs/stage5_conflict_recovery.yaml
+```
+
+Use `.venv/bin/python` on Linux. These commands use fixtures and require no Ollama installation.
+
+| Configuration | Scripted fixture result |
+|---|---|
+| `stage5.yaml` | Invalid initial plan corrected to allowed standard delivery, version 2 consumed; success |
+| `stage5_delayed.yaml` | Named gate holds correction until delivery action finishes; invalid initial version executed; task failure |
+| `stage5_unconsumed.yaml` | Correction delivered and received before action, left unused; task failure |
+| `stage5_harmless_delay.yaml` | Transport latency, executor still waits and consumes correction; success |
+| `stage5_tool_failure.yaml` | Mock delivery fails once, retries disabled; task failure |
+| `stage5_tool_recovery.yaml` | Same failure, one additional attempt succeeds; recovered success |
+| `stage5_conflict_recovery.yaml` | Both inventory updaters read version 0; B conflicts, refreshes and retries; both reservations retained, quantity 3; recovered success |
+| `stage5_optional_approval.yaml` | A compliant initial plan may execute before approval under its explicit contract; success; no correction fault activation |
+
+The fixture for `delivery_001` intentionally selects the invalid express option to exercise correction. It is excluded from the public task contract and live prompts. Fresh Qwen responses can already be compliant, in which case the checker sends an approval and the requested correction fault may not activate. Live runs are not forced to reproduce the fixture decision. Inspect actual messages and the private activation record rather than assuming that a configuration name proves activation. Missing required approval still violates `delivery_001` even when the selected option is compliant.
+
+`workflow.max_additional_retries` accepts only 0 or 1. Selected mock delivery attempts and reservation writes retain one logical `operation_id`, with distinct `attempt_id` values, attempt numbers and previous-attempt references. Instrumented `retry_decision` records preserve the failure/conflict reason and whether another attempt is allowed. `operation_result` identifies the final attempt accepted or rejected by the workflow; dependency exports include failed-attempt-to-retry and accepted-attempt edges. Recovery is recorded separately from task failure and infrastructure errors.
+
+Inventory recovery rereads current state and rebuilds the proposal from that fresh snapshot. It retains the already validated order quantity rather than regenerating model output. No lock spans read-modify-write. The recovering updater uses seven actions, within the eight-action limit. Mock tool recovery retries only the explicit transient tool error; malformed model output, replay mismatches and infrastructure failures are never silently retried. A rejected write creates no version. A second failed attempt ends recovery.
+
+Correction faults and the fail-once tool hook live in the separate fault controller. Validation rejects implicit correction faults, combined tool/correction faults, more than one additional retry, and insufficient action budgets. Controlled late correction uses a completion gate rather than a guessed sleep. The harmless latency example uses an ordinary configurable transport delay. Private records distinguish activation, task failure, recovered success, harmless activation and unknown outcomes; injection location is not a causal diagnosis.
+
+The delivery output separates `correction_recovered` from `tool_recovered`; overall `recovered` is true when either recovery leads to successful execution. Stage 5 validation checks that consumed plans appear in actual dependent tool inputs, retry links identify the preceding attempt and decision, and the final delivery output matches the accepted attempt. Tests include persistent tool failure, fresh-state conflict recovery, exact mocked live/replay matching, cancellation after model failure and evidence tampering. No real model is called by these local tests.
 
 ## Stage 4 scheduling and shared state
 
@@ -77,7 +112,7 @@ The task contract requires both valid orders to remain in state, correct quantit
 
 `lost_update` explicitly requires an enabled fault, `both_read_before_writes` and unconditional writes. `stale_state` uses a separate named state-read hook, supplying historical version 0 to updater B after A's write. Private records include target reached, activation, original/selected values and the exact injection event. Only one fault activates per run. The lost-update condition consists of schedule plus write policy, with no additional payload mutation. Both histories and the actual read/write dependencies remain observable. Injection activation is not a confirmed causal label.
 
-**No conflict retry is implemented in Stage 4.** `workflow.max_additional_retries` is restricted to 0. The conflict example demonstrates CAS protection from overwrite, but the task still fails because one required reservation is missing. Bounded conflict recovery belongs to Stage 5.
+The Stage 4 configurations retain `workflow.max_additional_retries: 0`. Their conflict example demonstrates CAS protection from overwrite but fails because one required reservation is missing. Stage 5's separate `stage5_conflict_recovery.yaml` enables one additional attempt.
 
 ## Stage 3 workflow
 
@@ -181,4 +216,4 @@ The earlier single-document extraction/checking workflow remains available:
 
 Its direct controller handoffs do not claim message lifecycle events. The document-ID fix remains in both workflows, with extraction prompt version 1.1. Responses from different prompts cannot replay against changed requests.
 
-Stage 5 adds correction and bounded retries, including conflict recovery. Later work adds the remaining fault families, SQLite catalogue, dataset exports/labels, inspection UI and pilot collection. Causal attribution remains outside the testbed runtime and recorder.
+Stages 2 through 5 are implemented, including all three core workflow templates and bounded tool/conflict recovery. Corrupted worker results and their detection/correction remain unimplemented Template A conditions. Later work adds those remaining fault conditions, SQLite catalogue, dataset exports/labels, inspection UI and Stage 6 pilot collection. Causal attribution remains outside the testbed runtime and recorder.

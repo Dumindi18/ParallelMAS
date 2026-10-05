@@ -8,7 +8,7 @@ class StrictModel(BaseModel):
 
 class Experiment(StrictModel):
     name: str
-    task_id: Literal["orders_001", "aggregation_001", "aggregation_002", "inventory_001", "inventory_002"]
+    task_id: Literal["orders_001", "aggregation_001", "aggregation_002", "inventory_001", "inventory_002", "delivery_001", "delivery_002"]
     mode: Literal["live", "recorded_response", "scripted_fixture"] = "scripted_fixture"
     seed: int = 42
     replay_directory: str | None = None
@@ -37,14 +37,17 @@ class RecordingConfig(StrictModel):
 
 
 class WorkflowConfig(StrictModel):
-    template: Literal["stage2_facts", "parallel_aggregation", "shared_record"] = "stage2_facts"
+    template: Literal["stage2_facts", "parallel_aggregation", "shared_record", "plan_correction"] = "stage2_facts"
     join_release_condition: Literal["all_inputs", "premature"] = "all_inputs"
     premature_after_results: int = Field(default=1, ge=1)
     join_timeout_seconds: float = Field(default=300, gt=0)
     message_delays: dict[str, float] = Field(default_factory=dict)
     hold_branch_until_aggregation: str | None = None
     state_write_policy: Literal["unconditional", "compare_and_set"] = "compare_and_set"
-    max_additional_retries: Literal[0] = 0
+    max_additional_retries: Literal[0, 1] = 0
+    correction_policy: Literal["wait", "delivered_unconsumed", "after_execution"] = "wait"
+    correction_delay_seconds: float = Field(default=0, ge=0)
+    mock_tool_fail_once: bool = False
 
     @model_validator(mode="after")
     def nonnegative_delays(self):
@@ -55,7 +58,7 @@ class WorkflowConfig(StrictModel):
 
 class FaultConfig(StrictModel):
     enabled: bool = False
-    family: Literal["premature_join", "lost_update", "stale_state"] | None = None
+    family: Literal["premature_join", "lost_update", "stale_state", "delayed_correction", "unconsumed_correction", "tool_failure"] | None = None
     target_join: Literal["department_orders"] = "department_orders"
     max_activations: Literal[1] = 1
     target_key: Literal["inventory.item_A"] = "inventory.item_A"
@@ -90,6 +93,9 @@ class Config(StrictModel):
             raise ValueError("recorded_response requires replay_directory")
         parallel = self.workflow.template == "parallel_aggregation"
         shared = self.workflow.template == "shared_record"
+        correction = self.workflow.template == "plan_correction"
+        if correction != self.experiment.task_id.startswith("delivery_"):
+            raise ValueError("delivery task_id requires plan_correction template")
         if parallel != self.experiment.task_id.startswith("aggregation_"):
             raise ValueError("task_id and workflow template must match")
         if shared != self.experiment.task_id.startswith("inventory_"):
@@ -98,7 +104,7 @@ class Config(StrictModel):
         if self.runtime.agents != required_agents:
             raise ValueError(f"this task requires {required_agents} agents")
         premature = self.workflow.join_release_condition == "premature"
-        if not shared and (premature != self.fault.enabled or (self.fault.enabled and self.fault.family != "premature_join")):
+        if not shared and not correction and (premature != self.fault.enabled or (self.fault.enabled and self.fault.family != "premature_join")):
             raise ValueError("premature release requires an explicit enabled premature_join fault")
         if not parallel and (premature or self.workflow.message_delays or self.workflow.hold_branch_until_aggregation):
             raise ValueError("message/join conditions require parallel_aggregation")
@@ -128,6 +134,24 @@ class Config(StrictModel):
                     raise ValueError("lost_update requires both_read_before_writes and unconditional writes")
             if self.fault.enabled and self.fault.family == "stale_state" and self.schedule.profile != "a_then_b":
                 raise ValueError("stale_state requires a_then_b so an older version exists at the target read")
+        if self.workflow.max_additional_retries and not correction:
+            if not shared or self.workflow.state_write_policy != "compare_and_set" or self.schedule.profile not in {"both_read_before_writes", "natural"}:
+                raise ValueError("state retries require compare_and_set with conflicting or natural execution")
+            if self.runtime.max_steps_per_agent < 7:
+                raise ValueError("state recovery requires seven actions")
+        if not correction and (self.workflow.correction_policy != "wait" or self.workflow.correction_delay_seconds or self.workflow.mock_tool_fail_once):
+            raise ValueError("correction/tool conditions require plan_correction")
+        if correction:
+            policy = self.workflow.correction_policy
+            family = {"after_execution": "delayed_correction", "delivered_unconsumed": "unconsumed_correction"}.get(policy)
+            if self.workflow.mock_tool_fail_once:
+                if family:
+                    raise ValueError("one fault per run: tool failure cannot accompany a correction fault")
+                family = "tool_failure"
+            if self.fault.enabled != bool(family) or self.fault.family != family:
+                raise ValueError("correction/tool fault must be explicitly enabled with matching family")
+            if self.runtime.max_steps_per_agent < 6:
+                raise ValueError("correction executor requires six actions including recovery")
         return self
 
 
@@ -142,7 +166,7 @@ class DependencyRef(StrictModel):
                           "message_send_delivery", "message_delivery_receive",
                           "message_delivery_consumption", "accepted_branch_result",
                           "state_write_read", "state_read_write", "state_previous_write",
-                          "schedule_order", "checkpoint_action"]
+                          "schedule_order", "checkpoint_action", "failed_attempt_retry", "retry_decision", "accepted_attempt"]
 
 
 class Event(StrictModel):
@@ -182,10 +206,15 @@ class OrderDecision(StrictModel):
     quantity: int = Field(ge=1, strict=True)
 
 
+class DeliveryPlan(StrictModel):
+    option_id: str
+    version: Literal[1]
+
+
 class Message(StrictModel):
     message_id: str
     sender_id: str
     receiver_id: str
-    message_type: Literal["worker_result"] = "worker_result"
+    message_type: Literal["worker_result", "initial_plan", "approval", "correction"] = "worker_result"
     payload_reference: PayloadRef
     source_event_id: str
