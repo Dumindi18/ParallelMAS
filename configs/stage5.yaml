@@ -1,0 +1,9 @@
+experiment:
+  name: correction_consumed_before_execution
+  task_id: delivery_001
+  mode: scripted_fixture
+  seed: 42
+workflow:
+  template: plan_correction
+  correction_policy: wait
+  max_additional_retries: 1

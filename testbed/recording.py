@@ -94,6 +94,10 @@ def validate_trace(directory):
     errors.extend(validate_message_evidence(directory, events))
     from .state_validation import validate_state_evidence
     errors.extend(validate_state_evidence(directory, events))
+    from .retries import validate_retry_evidence
+    from .correction import validate_correction_evidence
+    errors.extend(validate_retry_evidence(directory, events))
+    errors.extend(validate_correction_evidence(directory, events))
     return {"valid": not errors, "event_count": len(events), "errors": errors}
 
 
@@ -202,7 +206,7 @@ def validate_message_evidence(directory, events):
                     errors.append("aggregation did not use consumed payload")
             except (OSError, ValueError, KeyError):
                 errors.append("aggregation result lacks valid consumption")
-    if set(consumed) != used:
+    if {mid for mid, event in consumed.items() if event.details["message_type"] == "worker_result"} != used:
         # Failed/cancelled aggregation may have assembled an input without producing an output.
         aggregate_failed = any(e.step_id == "aggregate_orders" and e.status in {"failed", "cancelled", "timed_out"} for e in events)
         if not aggregate_failed:

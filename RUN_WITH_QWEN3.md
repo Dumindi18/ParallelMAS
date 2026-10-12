@@ -1,10 +1,10 @@
 # Run ParallelMAS Stages 2 through 4 with Qwen3:8b
 
-No Python source changes are needed. The project defaults to model-free fixtures; select `--mode live` on the machine that already has `qwen3:8b`. The default workflow is now **Stage 4 scheduling and shared state**. Stages 2 and 3 remain selectable.
+No Python source changes are needed. The project defaults to model-free fixtures; select `--mode live` on the machine that already has `qwen3:8b`. The default workflow is now **Stage 5 correction and bounded retries**. Stages 2, 3 and 4 remain selectable.
 
 ## 1. Copy/update and install
 
-Copy the updated `testbed/`, `tasks/`, `configs/`, `tests/`, `requirements.txt` and documentation. Include the new scheduling, state, state-validation and shared-state workflow modules, plus the inventory tasks and Stage 4 configurations. Create a virtual environment on the target machine rather than copying `.venv`. Preserve previous runs if their evidence is needed. No new dependency is required beyond `requirements.txt`.
+Copy the updated `testbed/`, `tasks/`, `configs/`, `tests/`, `requirements.txt` and documentation. Include `correction.py`, `retries.py`, the updated runtime/schema/model/transport/evaluation/validation/fault modules, both delivery tasks and all Stage 5 configurations. Create a virtual environment on the target machine rather than copying `.venv`. Preserve previous runs if their evidence is needed. No new dependency is required beyond `requirements.txt`.
 
 Use Python 3.11 or 3.12. From the project folder on Windows:
 
@@ -112,6 +112,68 @@ Leave them unchanged for local Ollama on the default port. Change `model.base_ur
 
 The live prompts contain document text and exact document/order identifiers. Stage 4 also supplies the actual inventory snapshot key, version and value. Models copy the supplied identifiers; they do not guess them. Fixture answers, expected totals and private fault controls are not supplied to the model.
 
+## Run Stage 5 correction and bounded retries
+
+After the Ollama setup above, run these sequentially on the target machine. Every command explicitly selects fresh live model responses.
+
+Linux:
+
+```bash
+.venv/bin/python -m testbed --config configs/stage5.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_delayed.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_unconsumed.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_harmless_delay.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_tool_failure.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_tool_recovery.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_conflict_recovery.yaml --mode live
+.venv/bin/python -m testbed --config configs/stage5_optional_approval.yaml --mode live
+```
+
+Windows:
+
+```powershell
+.venv/Scripts/python.exe -m testbed --config configs/stage5.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_delayed.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_unconsumed.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_harmless_delay.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_tool_failure.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_tool_recovery.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_conflict_recovery.yaml --mode live
+.venv/Scripts/python.exe -m testbed --config configs/stage5_optional_approval.yaml --mode live
+```
+
+Template B uses Qwen only to select the initial structured delivery plan. The checker enforces budget and prohibited-route constraints using local deterministic code and explicitly approves a version, correcting an invalid plan when needed. The executor invokes a local mock delivery tool; it sends no real delivery request. The normal executor waits for and consumes the checked plan before acting. The model input contains task instructions, options and public constraints, with no fixture answer or private injection settings.
+
+| Configuration | Expected behavior when model output is valid |
+|---|---|
+| `stage5.yaml` | Checked version consumed before action; success |
+| `stage5_delayed.yaml` | Checked message held until after execution; required approval unused; task failure |
+| `stage5_unconsumed.yaml` | Checked message delivered/received before execution but unused; required approval unused; task failure |
+| `stage5_harmless_delay.yaml` | Delayed checked message still consumed before execution; success |
+| `stage5_tool_failure.yaml` | One mock transient failure; no retry; task failure |
+| `stage5_tool_recovery.yaml` | One mock transient failure, one retry, accepted second result; recovered success |
+| `stage5_conflict_recovery.yaml` | CAS conflict, fresh state read, rebuilt proposal, one retry; both correct orders retained; quantity 3 |
+| `stage5_optional_approval.yaml` | Contract permits compliant early execution; success if the initial plan is compliant |
+
+The scripted `delivery_001` fixture intentionally begins with invalid express delivery to demonstrate correction. A live Qwen run may select a compliant option immediately. Then the checker sends approval rather than correction, and a requested correction fault may remain `not_activated`. The code does not replace a live model answer to force activation. Check `private/injection_manifest.json` and the actual message type before treating a run as evidence of an activated correction fault. Missing mandatory approval remains a task failure even if the delivery option itself is compliant. The optional-approval task demonstrates that late checking is not inherently an error.
+
+`max_additional_retries` is limited to 0 or 1. Tool attempts share a logical operation ID and have distinct attempt IDs. The first mock error remains a failed event even when the task recovers. Inventory retry reads current state and rebuilds the proposal from the validated order decision; it does not regenerate that decision or hold a lock across the sequence. The recovering updater uses seven actions. Malformed/truncated model output and replay mismatches are recorded without model regeneration.
+
+For each Stage 5 run, inspect `events.jsonl`, `final_output.json`, `trace_validation.json`, `observed_dependencies.json` and `private/outcome_assessment.json`. Look for `retry_decision` and `operation_result` events, their previous/final attempt IDs, failure reason and final accepted result. `final_output.json` records the selected and approved plan versions, approval consumption, accepted delivery attempt and recovery. Inventory runs additionally preserve `state_history.json` and actual/private schedule evidence as described below. An activated tool failure followed by successful recovery is labelled `activated_recovered`; labels remain separate from causal attribution.
+
+Intentional failure configurations return `passed: false` and exit code 1, while `status: completed` and `trace_validity: true` can still hold. Check task correctness and infrastructure failures separately. Live Qwen errors or wrong inventory quantities can change the expected task outcome; these examples are not substitutes for calibration and live measurements on the target machine.
+
+Local model-free verification and exact response replay:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m testbed --config configs/stage5_tool_recovery.yaml --mode scripted_fixture
+.venv/bin/python -m testbed --config configs/stage5.yaml --mode recorded_response --replay-directory runs/run_<matching-live-id>
+.venv/bin/python -m testbed --config configs/stage5_conflict_recovery.yaml --mode recorded_response --replay-directory runs/run_<matching-inventory-live-id>
+```
+
+Replace the example source directory with an actual live run. Use the source task, model settings and schedule; changed model inputs must match a recorded request exactly. On Windows replace `.venv/bin/python` with `.venv/Scripts/python.exe`. The tests use fixtures and mock HTTP responses and never call a real model.
+
 ## 4. Run Stage 4 scheduling and shared state
 
 Two updating agents interpret separate order documents, prepare deterministic inventory reservations, and write one versioned shared record. A third agent reads the final record for deterministic evaluation. Every run resets that record to version 0. The guide's starting one-record scope is preserved.
@@ -150,7 +212,7 @@ Controlled profiles use named asynchronous gates around reads/writes, not sleep-
 
 The task requires both valid reservations, correct quantities, inventory consistent with accepted writes and a current snapshot at the instant of each updater read. The stale experiment specifically supplies an older snapshot at that instant. The lost-update experiment uses valid reads followed by an overwrite due to schedule and unconditional write policy; no extra data mutation is added.
 
-Retries remain disabled (`workflow.max_additional_retries: 0`). Conflict recovery belongs to Stage 5. Do not treat the unrecovered-conflict run as an infrastructure error merely because its task fails.
+The Stage 4 files retain `workflow.max_additional_retries: 0`. Stage 5 adds a separate conflict-recovery configuration with one additional attempt. Do not treat the unrecovered-conflict run as an infrastructure error merely because its task fails.
 
 **For the lost-update, stale-state and conflict examples, `passed: false` and exit code 1 are expected**, alongside completed runtime and a valid trace. The first two should also have private records confirming the corresponding fault activation. The conflict example has no injected fault and demonstrates version-check protection without recovery. Live model mistakes may produce other outcomes; inspect the actual evidence.
 
@@ -185,7 +247,7 @@ Do not chain experiments with `&&` if later commands must run after an intention
 
 In the premature experiment, worker 2's message is held until the named aggregation action finishes, then delivered without consumption. Its join fault must be explicitly enabled; ordinary joins always wait for all inputs or record a timeout. Worker facts are model-generated; aggregation arithmetic is deterministic.
 
-Agents execute asynchronously, with model inference restricted to one shared serving slot. Run one experiment at a time and avoid competing client requests. Seeds do not guarantee identical live outputs. `python -m testbed` now defaults to `configs/stage4.yaml`, still in fixture mode unless overridden. To default a selected file to live execution, change `experiment.mode` to `live` in that YAML file.
+Agents execute asynchronously, with model inference restricted to one shared serving slot. Run one experiment at a time and avoid competing client requests. Seeds do not guarantee identical live outputs. `python -m testbed` now defaults to `configs/stage5.yaml`, still in fixture mode unless overridden. To default a selected file to live execution, change `experiment.mode` to `live` in that YAML file.
 
 ## 6. Interpret the console result
 
@@ -274,9 +336,9 @@ It independently extracts/checks one document and requires approval; its expecte
 - **Malformed/truncated/thinking output:** Inspect saved model events/responses; the runner does not repair or regenerate answers silently.
 - **Join timeout:** Inspect completed/delivered/accepted branches. Join timeout defaults to 300 seconds and overall timeout to 600. Review timings/resources before changing them.
 - **Schedule gate timeout:** Inspect the failing gate and missing checkpoints. A preceding model/action may not have completed. The saved assessment must not be interpreted as successful reproduction if constraints are incomplete.
-- **Stage 4 conflict:** A rejected write creates no new version and is not retried yet. Check the `version_conflict` reason rather than expecting both reservations to succeed.
+- **Stage 4 conflict:** A rejected write creates no new version and is not retried in that configuration. Use `stage5_conflict_recovery.yaml` to refresh state and retry once.
 - **Stage 4 stale/lost-update failure:** Inspect complete history, actual read versions, current versions, overwritten values and private activation records. A valid trace can faithfully record a failed task.
 - **Replay mismatch:** Use the correct task and unchanged request settings; old prompts cannot match changed requests.
 - **Missing GPU metrics:** Requires available `nvidia-smi`; CPU/RAM still work. Local monitoring does not measure a remote server's GPU.
 
-Stage 4 scheduling/versioned state and selected stale/lost-update conditions are now implemented. Stage 5 will add corrections and bounded retries; the remaining fault families, causal attribution and pilot collection remain later work.
+Stage 5 correction and bounded retries are implemented. The core workflows A, B and C are available. Corrupted-result conditions for Template A remain later work, along with Stage 6 pilot collection and inspection tooling. Causal attribution remains outside this testbed.

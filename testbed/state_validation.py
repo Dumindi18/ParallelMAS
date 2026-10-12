@@ -124,6 +124,12 @@ def validate_state_evidence(directory, events):
                 write = by_id[update["write_event_id"]]
                 if write.event_type != "state_write" or write.agent_id != update["agent_id"] or write.details["accepted"] != update["write_accepted"]:
                     errors.append("final update differs from write evidence")
-    except (OSError, ValueError, KeyError, TypeError):
+                read = next(by_id[dep.event_id] for dep in write.dependency_refs if dep.relationship == "state_read_write")
+                if (update["read_version"] != read.details["returned_version"]
+                        or update["current_version_at_read"] != read.details["current_version"]
+                        or update.get("attempts", 1) != write.details.get("attempt_number", 1)
+                        or update.get("recovered", False) != (write.details["accepted"] and write.details.get("attempt_number", 1) > 1)):
+                    errors.append("final update read/recovery differs from accepted write")
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
         errors.append("missing/invalid state or schedule export")
     return errors

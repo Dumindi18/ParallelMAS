@@ -40,10 +40,11 @@ class ParallelRuntime(Runtime):
         path = self.recorder.directory / "payloads" / f"{message.payload_reference.payload_id}.json"
         return json.loads(path.read_text(encoding="utf-8"))
 
-    async def send_message(self, agent, receiver_id, value, source_event_id):
+    async def send_message(self, agent, receiver_id, value, source_event_id, message_type="worker_result"):
         if receiver_id not in self.agents:
             raise ValueError("unknown message recipient")
         message = Message(message_id=uuid4().hex, sender_id=agent.agent_id, receiver_id=receiver_id,
+                          message_type=message_type,
                           payload_reference=self.recorder.payload(value), source_event_id=source_event_id)
         async def send(evidence):
             evidence["_input_refs"] = [message.payload_reference]
@@ -87,7 +88,7 @@ class ParallelRuntime(Runtime):
         self.received[receipt.message.message_id] = receipt
         return receipt
 
-    async def consume_message(self, agent, receipt, step):
+    async def consume_message(self, agent, receipt, step, consuming_step="aggregate_orders"):
         message = receipt.message
         if self.received.get(message.message_id) is not receipt or message.receiver_id != agent.agent_id:
             raise ValueError("message must be received by its owner before consumption")
@@ -102,7 +103,7 @@ class ParallelRuntime(Runtime):
              DependencyRef(event_id=receipt.receive_event_id, relationship="produced_output")],
             {**message.model_dump(), "send_event_id": receipt.send_event_id,
              "delivery_event_id": receipt.delivery_event_id, "receive_event_id": receipt.receive_event_id,
-             "consuming_step_id": "aggregate_orders"})
+             "consuming_step_id": consuming_step})
 
     async def wait_for_join(self, agent, required):
         join_id = "department_orders"

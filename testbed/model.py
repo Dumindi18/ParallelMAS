@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 import httpx
 from .recording import digest
-from .schema import Facts, OrderDecision
+from .schema import Facts, OrderDecision, DeliveryPlan
 
 
 class ModelFailure(Exception):
@@ -93,7 +93,7 @@ class SharedModel:
             if message.get("thinking"):
                 raise ModelFailure("thinking_not_disabled")
             try:
-                response_model = next((schema for schema in (Facts, OrderDecision)
+                response_model = next((schema for schema in (Facts, OrderDecision, DeliveryPlan)
                                        if schema.model_json_schema() == body["format"]), None)
                 if response_model is None:
                     raise ValueError("unsupported response schema")

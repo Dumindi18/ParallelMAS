@@ -1,0 +1,10 @@
+experiment:
+  name: correction_delivered_but_unused
+  task_id: delivery_001
+  mode: scripted_fixture
+workflow:
+  template: plan_correction
+  correction_policy: delivered_unconsumed
+fault:
+  enabled: true
+  family: unconsumed_correction

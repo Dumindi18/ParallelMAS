@@ -1,0 +1,10 @@
+experiment:
+  name: correction_held_until_execution
+  task_id: delivery_001
+  mode: scripted_fixture
+workflow:
+  template: plan_correction
+  correction_policy: after_execution
+fault:
+  enabled: true
+  family: delayed_correction

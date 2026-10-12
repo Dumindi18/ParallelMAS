@@ -1,0 +1,11 @@
+experiment:
+  name: mock_tool_fails_once_then_recovers
+  task_id: delivery_001
+  mode: scripted_fixture
+workflow:
+  template: plan_correction
+  mock_tool_fail_once: true
+  max_additional_retries: 1
+fault:
+  enabled: true
+  family: tool_failure

@@ -1,0 +1,11 @@
+experiment:
+  name: inventory_conflict_recovered_once
+  task_id: inventory_001
+  mode: scripted_fixture
+workflow:
+  template: shared_record
+  state_write_policy: compare_and_set
+  max_additional_retries: 1
+schedule:
+  mode: controlled
+  profile: both_read_before_writes

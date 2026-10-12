@@ -1,0 +1,8 @@
+experiment:
+  name: execution_waits_for_delayed_correction
+  task_id: delivery_001
+  mode: scripted_fixture
+workflow:
+  template: plan_correction
+  correction_policy: wait
+  correction_delay_seconds: 0.1

@@ -1,0 +1,10 @@
+{
+  "task_id": "delivery_002",
+  "instruction": "Select standard delivery. Execution of a compliant initial plan is allowed without waiting for approval.",
+  "options": [
+    {"option_id": "standard", "cost_cents": 800, "route": "main_road"},
+    {"option_id": "express", "cost_cents": 1400, "route": "restricted_bridge"}
+  ],
+  "requirements": {"budget_cents": 1000, "prohibited_routes": ["restricted_bridge"], "approval_required_before_execution": false},
+  "fixture_plan": {"option_id": "standard", "version": 1}
+}

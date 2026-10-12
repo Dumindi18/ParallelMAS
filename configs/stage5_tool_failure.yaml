@@ -1,0 +1,11 @@
+experiment:
+  name: mock_tool_failure_without_retry
+  task_id: delivery_001
+  mode: scripted_fixture
+workflow:
+  template: plan_correction
+  mock_tool_fail_once: true
+  max_additional_retries: 0
+fault:
+  enabled: true
+  family: tool_failure

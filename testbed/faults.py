@@ -62,3 +62,29 @@ class StateFaultController:
                 self.record.update(activated=True, activation_count=1, injection_event=event_id,
                                    original_values={"version": result["previous_current_version"], "value": result["previous_value"]},
                                    modified_values={"version": result["new_version"], "value": result["new_value"]})
+class CorrectionFaultController:
+    """Named message-delivery and mock-tool hooks; one experimental fault per run."""
+    def __init__(self, config):
+        self.config = config
+        self.record = {"enabled": config.fault.enabled, "family": config.fault.family,
+                       "requested_target": "correction_delivery" if config.workflow.correction_policy != "wait" else "mock_delivery",
+                       "target_reached": False, "activated": False, "activation_count": 0,
+                       "injection_event": None, "original_value": None, "modified_value": None,
+                       "intended_condition": config.experiment.name, "status": "not_requested"}
+
+    def activate(self, event_id, original, modified):
+        self.record.update(target_reached=True)
+        if self.config.fault.enabled and not self.record["activated"]:
+            self.record.update(activated=True, activation_count=1, injection_event=event_id,
+                               original_value=original, modified_value=modified)
+
+    def correction_delivery(self, message, event_id):
+        if message.message_type == "correction" and self.config.workflow.correction_policy != "wait":
+            self.activate(event_id, {"delivery": "before_execution", "consume": True},
+                          {"delivery": self.config.workflow.correction_policy, "consume": False})
+
+    def fail_tool(self, number, arguments, event_id):
+        if self.config.workflow.mock_tool_fail_once and number == 1:
+            self.activate(event_id, {"result": "success", "arguments": arguments}, {"result": "mock_transient_tool_failure"})
+            return True
+        return False
